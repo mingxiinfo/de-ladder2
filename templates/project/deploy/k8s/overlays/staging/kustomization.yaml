@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: sample-staging
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: HTTPRoute
+      name: sample
+    patch: |-
+      - op: replace
+        path: /spec/hostnames
+        value: ["sample.staging.example.internal"]   # 改：这个环境的域名

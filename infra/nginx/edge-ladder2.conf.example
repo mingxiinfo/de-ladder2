@@ -1,0 +1,35 @@
+# 边缘（Domestic 或云服务器）Nginx：把一个域名转到内网服务器的宿主机 Nginx。没有实测。
+# 正式配置放部署仓 de-mingxi/compass/deploy/nginx/conf.d/。改编自 cc-studio 的样板。
+
+upstream ladder2_s2 {
+    server 10.88.88.89:80 max_fails=2 fail_timeout=10s;    # s2（地址待确认）
+    # 阶段 B 两台都能接流量后，加上 s1：
+    # server 10.88.88.88:80 max_fails=2 fail_timeout=10s;
+    keepalive 64;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name sample.example.com;
+    ssl_certificate     /etc/letsencrypt/live/sample.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/sample.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://ladder2_s2;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        # 覆盖而不是追加：后面各层只信任这里写入的客户端地址。
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 300s;
+        # 只在没连上时换节点；已经发出去的请求不重放。
+        proxy_next_upstream error timeout;
+        proxy_next_upstream_tries 2;
+        proxy_buffering off;
+    }
+}

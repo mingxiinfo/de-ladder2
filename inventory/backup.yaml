@@ -1,0 +1,40 @@
+# 备份清单（docs/19）。manage.sh backup plan 读这份文件。
+# 这里只写"备份什么、用什么工具、放哪"。凭据（OSS 密钥、加密密钥）不写在这里。
+# 标 "待确认" 的要先在现场核对，否则该项不会被执行。
+# docs/22 修订：每日备份直接写 NAS，不先落本机盘。本机只留小库、etcd、凭据、配置的最近 1 份。
+# 大库不每天整份导出：每周一次完整备份，日志（WAL）持续归档。只有一级和二级库传 OSS。
+# 每个库属于哪一级还没定（docs/22 的分级表是推测），定了以后写进 inventory/projects.yaml。
+targets:
+  local: { path: /data/backup, keep: 最近 1 份，只放小库和 etcd、凭据、配置 }
+  nas:   { path: /mnt/nas/backup, keep: 每日 14 份 + 每周 8 份 }
+  oss:   { bucket: 待确认, keep: 每周 12 份 + 每月 12 份, encrypt: 上传前加密 }
+
+schedule:
+  daily: "02:00 直接写 NAS"
+  weekly: "周日 04:00 一级和二级库的最新一份加密后传 OSS；大库每周一次完整备份"
+
+items:
+  cluster-etcd:      { host: s2, kind: etcd,     tool: etcdctl snapshot save,            what: 新集群的 etcd }
+  cluster-pki:       { host: s2, kind: files,    tool: tar,                              what: /etc/kubernetes/pki }
+  k8s-secrets:       { host: s2, kind: kube,     tool: kubectl get secret -A -o yaml,    what: 所有命名空间的 Secret }
+  k8s-resources:     { host: s2, kind: kube,     tool: kubectl get -o yaml,              what: 每个命名空间的全部资源，用来对照 Git }
+  pg-common:         { host: s2, kind: postgres, tool: pg_dump -Fc + pg_basebackup,      what: Hub、DataPort 的库 }
+  pg-pay:            { host: s2, kind: postgres, tool: pg_dump -Fc + pg_basebackup,      what: 支付库。迁移前在 s1 }
+  host-config-s2:    { host: s2, kind: files,    tool: tar,                              what: nginx、fstab、systemd 自定义 unit、隧道、防火墙 }
+  l1-etcd:           { host: s1, kind: etcd,     tool: etcdctl snapshot save,            what: L1 集群的 etcd，只读操作 }
+  l1-pki:            { host: s1, kind: files,    tool: tar,                              what: s1 的 /etc/kubernetes/pki }
+  l1-pg-launcher:    { host: s1, kind: postgres, tool: pg_dump -Fc,                      what: mx-internal-shadow/mx-internal-postgres }
+  l1-pg-common:      { host: s1, kind: postgres, tool: pg_dump -Fc,                      what: mx-common/mx-common-postgres（迁到 s2 之前） }
+  l1-pg-pay:         { host: s1, kind: postgres, tool: pg_dump -Fc,                      what: mx-pay/mx-pay-postgres（迁到 s2 之前） }
+  l1-pg-rig:         { host: s1, kind: postgres, tool: pg_dump -Fc,                      what: mx-rig/mx-rig-postgres }
+  host-pg:           { host: s1, kind: postgres, tool: pg_dump -Fc,                      what: 宿主机 PostgreSQL 5432。大小待确认 }
+  l1-project-env:    { host: s1, kind: files,    tool: tar,                              what: 各项目的 .env 和 secrets 目录。路径待确认 }
+  host-config-s1:    { host: s1, kind: files,    tool: tar,                              what: nginx、fstab、systemd 自定义 unit、WireGuard、OpenVPN }
+  source-revisions:  { host: s2, kind: meta,     tool: git rev-parse,                    what: 每个登记仓库当时的提交号 }
+
+excluded:
+  elasticsearch: 数据库的可重建投影
+  redis: 只有缓存
+  images: 从源码重建或从镜像仓库拉
+  models: 重新下载
+  nas-media: 太大（6.5T）。按项目另行处理，见 docs/19 文末

@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+# 凭据和现场配置永远不进 Git
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.ovpn
+kubeconfig*
+# 本地状态、报告、图册的生成物检查文件
+.state/
+reports/
+docs/atlas/*.visual-check.*
+docs/atlas/*.delivery.json

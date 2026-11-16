@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>de-ladder2 架构图册</title>
+<style>
+  :root { --bg:#f6f8fa; --card:#fff; --ink:#183744; --mute:#5d7686; --line:#d9e5ed; --accent:#1790a0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f171c; --card:#16222a; --ink:#e6eef2; --mute:#93a9b6; --line:#263842; --accent:#4cc3d1; } }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width:980px; margin:0 auto; padding:40px 16px 56px; }
+  h1 { font-size:28px; margin:0 0 6px; }
+  p.lead { color:var(--mute); margin:0 0 28px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
+  a.card { display:block; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; text-decoration:none; color:inherit; }
+  a.card:hover { border-color:var(--accent); }
+  .num { font:13px ui-monospace, monospace; color:var(--accent); }
+  .card strong { display:block; font-size:19px; margin:4px 0 6px; }
+  .card span { color:var(--mute); font-size:14px; }
+  .note { margin-top:28px; padding:12px 16px; border-left:3px solid var(--accent); background:var(--card); font-size:14px; color:var(--mute); }
+  code { font:13px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>de-ladder2 架构图册</h1>
+  <p class="lead">2026-11-17。全部是设计，没有在任何服务器或集群上执行过。内容以对应的文档为准。</p>
+  <div class="grid">
+    <a class="card" href="01-current.html"><div class="num">01 · docs/01</div><strong>现状</strong><span>一台服务器上的一切：请求怎么进来，数据在哪，哪些不能碰。</span></a>
+    <a class="card" href="02-target.html"><div class="num">02 · docs/16、18</div><strong>目标：两个集群并存</strong><span>s1 不调整，s2 建新集群；公网和内网各一个入口。</span></a>
+    <a class="card" href="03-backup.html"><div class="num">03 · docs/19</div><strong>备份与一键还原</strong><span>本机、NAS、OSS 三份；有备份包和源码就能还原。</span></a>
+    <a class="card" href="04-roles.html"><div class="num">04 · docs/17</div><strong>机器的四种角色</strong><span>control、node、site、edge。谁进集群，谁不进。</span></a>
+  </div>
+  <div class="note">每张图右上角可以切换主题、导出图片。源文件是同名的 <code>.json</code>，改完运行 <code>./scripts/manage.sh diagrams</code> 重新生成。</div>
+</main>
+</body>
+</html>

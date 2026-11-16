@@ -1,0 +1,94 @@
+# 主机登记。事实来源写在 source 里；标 "待确认" 的字段没有人核对过，不要当成事实使用。
+# 这里不放密码、token、私钥。凭据只写"存在哪台机器的哪个路径"。
+# role 取值（docs/17）：control | node | site | edge | l1（现役旧集群）| storage
+sites:
+  internal:
+    desc: 办公室内网机房，无公网入口，所有服务器在同一个 LAN
+    lan: 192.168.1.0/24
+  domestic:
+    desc: 国内公网 VPS，唯一公网入口（TLS 终结 + WireGuard 中继）
+  oversea:
+    desc: 海外服务器，MX-H2I 出网与订阅用，不属于本工程的集群
+  # 上一轮这里另有一个站点名 cloud，已取消（docs/21）：租来的机器在国内归 domestic，在海外归 oversea。
+
+hosts:
+  s1:
+    name: mx-internal-server
+    site: internal
+    role: l1
+    desc: L1 现役（level-1 全部服务）。集群不调整，脚本要求单节点（docs/16）。阶段 B 才变成 node
+    lan_ip: 192.168.1.2
+    wg_ip: 10.88.88.88
+    openvpn_ip: 100.127.0.10        # qp-tunnel-cli open mesh，instance mx，profile internal-01
+    os: CentOS 系（LVM 卷组 cl），具体版本待确认
+    cpu: 128 核（出自 mx-static/docs/capacity.md）
+    memory: 256G（使用约 60%）
+    disks:                          # df -TH 截图，2026-11-17
+      - nvme1：/ 是 cl-root 1.1T，已用 669G（61%），只放 k8s 相关（containerd、kubelet、etcd、mx-move 副本）
+      - nvme1：/home 是 cl-home 882G，已用 478G（55%），内容待确认
+      - nvme0：/data 2.0T，已用 1.2T（56%），业务数据
+    gpus: 现在 4 块 RTX 5090（编号 0–3，全部 GPU 都在这台）；s2 到位后规划留 2 块（用户 2026-11-17 第三轮）。留哪两块没定，拆卡前要做的事见 docs/21
+    nas_mount: /mnt/nas
+    k8s: kubeadm 单节点 1.36，独立 mx-k8s-containerd，flannel
+    listen:
+      80: 宿主机 Nginx（MX_INTERNAL_GATEWAY_PORT80_OWNER=host-nginx）
+      8008: Caddy 应用网关（集群内 DaemonSet，hostNetwork）
+      18090: Caddy，Launcher Internal API 入口
+      18444: 公网身份入口（hostPort）
+      5432: 宿主机 PostgreSQL 16（Night-All / po-infra 源数据，不是 mx-common 的库）
+      7788: 构建用出网代理（mihomo）
+      7789: 构建用出网代理（Device / Pay 曾用）
+    source: electron-dock/README.md、mx-launcher/docs/50、mx-base/mx-move/README.md、用户提供的 fstab 截图
+
+  s2:
+    name: 待定（建议 mx-internal-server-2）
+    site: internal
+    role: control
+    desc: 新集群的第一个控制面，也是发起所有操作的主控
+    lan_ip: 192.168.1.4              # 用户 2026-11-17，可调整
+    wg_ip: 待确认（建议 10.88.88.89）
+    os: Ubuntu 26.04
+    memory: 约 256G（用户口述"差不多"）
+    disks: 预计 2T，一块。分卷方案见 docs/16；建议加一块小 SSD 放系统和 etcd
+    gpus: 现在没有。规划从 s1 移 2 块 RTX 5090 过来（docs/21）
+    nas_mount: /mnt/nas（与 s1 同参数）
+    k8s: kubeadm v1.36，flannel，controlPlaneEndpoint k8s-api.ladder2.internal
+
+  nas:
+    name: nas-storage
+    site: internal
+    role: storage
+    desc: 冷存储：媒体归档、备份。单点，机械盘
+    lan_ip: 192.168.1.3              # 出自 mx-static/docs/capacity.md
+    capacity: 32T，已用 6.5T（21%）。df -TH 截图，2026-11-17。机械盘、内存大小出自 mx-static/docs/capacity.md，待确认
+    export: nas-storage:/volume1/data1
+    fstab: >-
+      nas-storage:/volume1/data1 /mnt/nas nfs
+      rw,_netdev,hard,vers=3,proto=tcp,rsize=524288,wsize=524288,timeo=600,retrans=2,sec=sys,x-systemd.mount-timeout=60s,x-systemd.before=docker.service 0 0
+    used_by: infra 约 500 GiB、delta 约 937 GiB（2026-09-28 迁移记录）
+    source: 用户提供的 fstab 截图、mx-base/mx-static/README.md
+
+  domestic:
+    name: 待确认
+    site: domestic
+    role: edge
+    desc: 公网 443（Compose Nginx，按 SNI 分域名）+ WireGuard 中继
+    wg_ip: 10.88.0.1
+    spec: 2 vCPU / 4 GiB / 峰值 100 Mbps / 流量 0.8 元每 GB
+    source: mx-launcher/docs/53、de-mingxi/compass/deploy/README.md
+
+  cloud:
+    name: 未租用
+    site: 待定                       # 在国内归 domestic，在海外归 oversea（docs/21）
+    role: site
+    desc: 独立站点，可兼做公网入口。不加入集群（docs/17）。区域未定
+
+# s1 上现有的 bind 挂载（来自 fstab 截图）。数据实际位置由这些行决定，清单里看不出来。
+s1_bind_mounts:
+  - /data/mx-runtime/containerd -> /var/lib/containerd
+  - /var/lib/mx-move/k8s-data/mx-k8s-20261020-053718-a8d8c128/kubelet -> /var/lib/kubelet
+  - /var/lib/mx-move/etcd-data/mx-etcd-20261019-181949-157ad6a7 -> /var/lib/etcd
+  - /var/lib/mx-move/k8s-data/mx-k8s-20261020-053718-a8d8c128/launcher -> /var/lib/mx-launcher
+  - /var/lib/mx-move/k8s-data/mx-k8s-20261020-053718-a8d8c128/common -> /data/k8s/mx-runtime/mx-common/k8s
+  - /var/lib/mx-move/k8s-data/mx-k8s-20261020-053718-a8d8c128/rig -> /data/mx-rig
+  - /var/lib/mx-move/k8s-data/mx-k8s-20261020-053718-a8d8c128/pay-postgres -> /data/mx-pay/mx-pay/postgres

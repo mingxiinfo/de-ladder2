@@ -1,0 +1,60 @@
+# 内网服务器（s2）宿主机 Nginx：80 端口的唯一主人。没有实测。
+# 正式配置放部署仓 de-mingxi/compass/deploy/internal-nginx/，这里是样板。
+# 规则见 docs/05：进了集群的域名转到网关 30080；没进集群的程序直接转到它的端口。
+
+# 请求编号：上游带了就沿用，没带就生成。每一层原样往后传，并记进访问日志（docs/26）。
+map $http_x_request_id $ladder2_rid {
+    default $http_x_request_id;
+    ""      $request_id;
+}
+
+# rt 是这一层总共花的时间，urt 是后面所有层花的时间，差就是这一层自己的开销。
+log_format ladder2 '$time_iso8601 $ladder2_rid $host "$request" $status '
+                   'rt=$request_time uct=$upstream_connect_time '
+                   'uht=$upstream_header_time urt=$upstream_response_time';
+
+upstream ladder2_gateway {
+    server 127.0.0.1:30080;
+    keepalive 64;
+}
+
+# 进了 L2 集群的域名：每迁一个项目，在 server_name 里加一个。
+server {
+    listen 80;
+    server_name sample.example.com;
+    access_log /var/log/nginx/ladder2.access.log ladder2;
+
+    location = /gateway-health { return 200 "ok\n"; }
+
+    location / {
+        proxy_pass http://ladder2_gateway;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        # 原样传递边缘写入的客户端地址。办公网直连时没有这个头，就用直连地址。
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_set_header X-Request-Id $ladder2_rid;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 300s;
+        proxy_buffering off;      # 流式响应逐块转发
+    }
+}
+
+# 只对内网开放的应用：转到 Gateway internal（docs/18）。
+# 这个 server 只监听 LAN 地址；防火墙上 30081 不对边缘的 10.88.0.1 开放。
+# server {
+#     listen 192.168.1.4:80;
+#     server_name some-app.internal.example;
+#     location / { proxy_pass http://127.0.0.1:30081; include snippets/proxy-common.conf; }
+# }
+
+# 没进集群的程序：直接转到它监听的本机端口。
+# server {
+#     listen 80;
+#     server_name some-legacy.example.com;
+#     location / { proxy_pass http://127.0.0.1:18141; include snippets/proxy-common.conf; }
+# }
+
+# 静态文件的磁盘缓存（docs/25）：后端是只读挂载 NAS 的文件服务，或 mx-static。要配超时和 proxy_cache_use_stale。
+# proxy_cache_path /data/cache/static levels=1:2 keys_zone=mxstatic:100m max_size=200g inactive=30d use_temp_path=off;

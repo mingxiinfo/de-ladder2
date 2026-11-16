@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "备份与一键还原",
+    "subtitle": "设计；backup run 和 restore 还没实现",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/atlas/03-backup.html"
+  },
+  "stages": [
+    {
+      "label": "来源"
+    },
+    {
+      "label": "本机 · 每天 02:00"
+    },
+    {
+      "label": "NAS · 每日 14 份"
+    },
+    {
+      "label": "OSS · 每周"
+    },
+    {
+      "label": "还原"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "pg",
+      "type": "database",
+      "label": "数据库",
+      "sublabel": "pg_dump · basebackup",
+      "stage": 0,
+      "row": 0,
+      "width": 150
+    },
+    {
+      "id": "etcd",
+      "type": "backend",
+      "label": "etcd · 证书",
+      "sublabel": "两个集群各一份",
+      "stage": 0,
+      "row": 1,
+      "width": 150
+    },
+    {
+      "id": "sec",
+      "type": "security",
+      "label": "凭据 · 配置",
+      "sublabel": "Secret · .env · nginx",
+      "stage": 0,
+      "row": 2,
+      "width": 150
+    },
+    {
+      "id": "local",
+      "type": "backend",
+      "label": "/data/backup",
+      "sublabel": "带 MANIFEST.json",
+      "stage": 1,
+      "row": 1,
+      "width": 150
+    },
+    {
+      "id": "nas",
+      "type": "database",
+      "label": "/mnt/nas/backup",
+      "sublabel": "防一台服务器坏",
+      "stage": 2,
+      "row": 1,
+      "width": 150
+    },
+    {
+      "id": "oss",
+      "type": "cloud",
+      "label": "OSS",
+      "sublabel": "加密 · 防机房出事",
+      "stage": 3,
+      "row": 1,
+      "width": 150
+    },
+    {
+      "id": "rst",
+      "type": "backend",
+      "label": "manage.sh restore",
+      "sublabel": "备份包 + 源码",
+      "stage": 4,
+      "row": 1,
+      "width": 160
+    }
+  ],
+  "flows": [
+    {
+      "from": "pg",
+      "to": "local",
+      "label": "逻辑 + 物理",
+      "fromSide": "right",
+      "toSide": "top"
+    },
+    {
+      "from": "etcd",
+      "to": "local",
+      "label": "快照"
+    },
+    {
+      "from": "sec",
+      "to": "local",
+      "label": "打包",
+      "fromSide": "right",
+      "toSide": "bottom"
+    },
+    {
+      "from": "local",
+      "to": "nas",
+      "label": "同一次任务",
+      "variant": "emphasis"
+    },
+    {
+      "from": "nas",
+      "to": "oss",
+      "label": "周日 · 加密",
+      "variant": "security"
+    },
+    {
+      "from": "oss",
+      "to": "rst",
+      "label": "灾难时",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "不备份",
+      "items": [
+        "ES 索引：从数据库重建",
+        "镜像、模型：重新构建和下载",
+        "NAS 上的媒体：太大，另行处理"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "规矩",
+      "items": [
+        "加密密钥不能只放在被备份的机器上",
+        "目标位置已有数据时拒绝还原"
+      ]
+    }
+  ]
+}

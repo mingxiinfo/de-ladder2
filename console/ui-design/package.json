@@ -1,0 +1,55 @@
+{
+  "name": "@qpjoy/ui-design-neon-void",
+  "version": "2.3.19",
+  "description": "QPJoy Neon Void dark and cool-light design tokens and CSS component library.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./styles.css": "./dist/styles.css",
+    "./tokens.css": "./dist/tokens.css",
+    "./tokens.json": "./dist/tokens.json",
+    "./package.json": "./package.json",
+    "./select.js": {
+      "types": "./dist/select.d.ts",
+      "import": "./dist/select.js"
+    },
+    "./select.css": "./dist/select.css"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": [
+    "./dist/styles.css",
+    "./dist/tokens.css",
+    "./dist/select.css"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm build",
+    "test:browser": "node tests/select.browser.mjs"
+  },
+  "keywords": [
+    "qpjoy",
+    "design-system",
+    "css",
+    "tokens",
+    "dark-theme",
+    "light-theme",
+    "neon"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,35 @@
+# 平台为每个项目创建：命名空间、配额、默认限额。由平台 apply，不由项目 apply。
+# 测试环境可选；要的话再建一份，名字加 -staging。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sample
+  labels:
+    ladder2/gateway: enabled    # 允许往 Gateway public / internal 挂路由
+    ladder2/project: sample
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: quota
+  namespace: sample
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.memory: 32Gi
+    pods: "40"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: sample
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        memory: 512Mi

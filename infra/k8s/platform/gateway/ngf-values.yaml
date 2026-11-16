@@ -1,0 +1,30 @@
+# NGINX Gateway Fabric 的 Helm values。字段名抄自 cc-studio（对着 2.8.1 的 chart 核对过），本工程没实测。
+nginxGateway:
+  gatewayClassName: nginx
+nginx:
+  kind: deployment
+  # 单节点上两个副本防进程崩溃和滚动更新断流。有第二个节点时改成 daemonSet。
+  replicas: 2
+  podDisruptionBudget:
+    enable: true
+    minAvailable: 1
+  service:
+    type: NodePort
+    # Local 保留来源地址，网关才能只信任宿主机 Nginx 带来的 X-Forwarded-For。
+    externalTrafficPolicy: Local
+    # 两个 Gateway 各有自己的数据面和 Service。按监听端口映射 NodePort：
+    # public 监听 80 → 30080，internal 监听 8080 → 30081（与 versions.env 一致）。
+    # 待实测：这份全局配置是否按监听端口分别作用到两个 Gateway（docs/15）。
+    nodePorts:
+      - port: 30080
+        listenerPort: 80
+      - port: 30081
+        listenerPort: 8080
+  config:
+    rewriteClientIP:
+      mode: XForwardedFor
+      trustedAddresses:
+        # 宿主机 Nginx 转发到本机 30080 时，网关看到的来源地址。
+        # 待实测：可能是节点的 LAN 地址或 CNI 网桥地址，不一定是 127.0.0.1（docs/15）。
+        - type: IPAddress
+          value: 192.168.1.254   # 占位，装之前改成实测值

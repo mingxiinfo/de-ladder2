@@ -1,0 +1,14 @@
+# 链路探测登记（docs/26）。manage.sh probe 读这份文件。
+# 一条链路 = 同一个请求从外到里的四个进入点：edge（公网域名）、host_nginx、gateway、service。
+# 某一层没有或还不知道地址就写 待确认，探测时显示"未登记"，不会被当成不通。
+# host：请求里的域名，内网各层靠它选路由。path：探测路径，用不访问数据库的 /healthz。
+# 这里不放带凭据的地址。
+routes:
+  sample:
+    what: 样板服务，打通全链路时用。s2 还没装，下面的地址现在都不通
+    host: sample.example.com
+    path: /healthz
+    edge: 待确认
+    host_nginx: http://192.168.1.4
+    gateway: http://192.168.1.4:30080
+    service: 待确认

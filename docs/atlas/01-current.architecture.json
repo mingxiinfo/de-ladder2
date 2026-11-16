@@ -1,0 +1,216 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "现状 · 一台服务器上的一切",
+    "subtitle": "读自 L1 文档和 2026-11-17 的 df 截图，不是线上盘点",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/atlas/01-current.html"
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [
+      40,
+      90
+    ],
+    "cols": 5,
+    "gapX": 64,
+    "gapY": 64,
+    "cellW": 176,
+    "cellH": 80
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "公网用户",
+      "sublabel": "浏览器 · Luopan",
+      "row": 0,
+      "col": 0
+    },
+    {
+      "id": "domestic",
+      "type": "cloud",
+      "label": "Domestic",
+      "sublabel": "Nginx 443 · 100 Mbps",
+      "row": 0,
+      "col": 1
+    },
+    {
+      "id": "nginx",
+      "type": "backend",
+      "label": "宿主机 Nginx",
+      "sublabel": "s1 的 80 端口",
+      "row": 0,
+      "col": 2
+    },
+    {
+      "id": "hub",
+      "type": "backend",
+      "label": "业务工作负载",
+      "sublabel": "Hub · DataPort · Pay",
+      "row": 0,
+      "col": 3
+    },
+    {
+      "id": "pgc",
+      "type": "database",
+      "label": "mx-common PG",
+      "sublabel": "ES · Redis · HanLP",
+      "row": 0,
+      "col": 4
+    },
+    {
+      "id": "h2i",
+      "type": "frontend",
+      "label": "MX-H2I 客户端",
+      "sublabel": "分流 DNS · NRPT",
+      "row": 1,
+      "col": 0
+    },
+    {
+      "id": "caddy",
+      "type": "security",
+      "label": "Caddy",
+      "sublabel": "8008 · 18090",
+      "row": 1,
+      "col": 2
+    },
+    {
+      "id": "launcher",
+      "type": "backend",
+      "label": "Launcher",
+      "sublabel": "身份 · 产品网络",
+      "row": 1,
+      "col": 3
+    },
+    {
+      "id": "pgl",
+      "type": "database",
+      "label": "Launcher PG",
+      "sublabel": "单实例 · hostPath",
+      "row": 1,
+      "col": 4
+    },
+    {
+      "id": "legacy",
+      "type": "backend",
+      "label": "Night-All · po-*",
+      "sublabel": "Compose · 宿主机进程",
+      "row": 2,
+      "col": 3
+    },
+    {
+      "id": "hostpg",
+      "type": "database",
+      "label": "宿主机 PG 5432",
+      "sublabel": "只听回环地址",
+      "row": 2,
+      "col": 4
+    },
+    {
+      "id": "nas",
+      "type": "database",
+      "label": "NAS 32T",
+      "sublabel": "NFS · 机械盘",
+      "row": 3,
+      "col": 3
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "s1 · 内存和三个盘都在 55%–61%",
+      "wraps": [
+        "nginx",
+        "hub",
+        "pgc",
+        "caddy",
+        "launcher",
+        "pgl",
+        "legacy",
+        "hostpg"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "user",
+      "to": "domestic",
+      "label": "TLS",
+      "variant": "emphasis"
+    },
+    {
+      "from": "domestic",
+      "to": "nginx",
+      "label": "WireGuard",
+      "variant": "emphasis"
+    },
+    {
+      "from": "nginx",
+      "to": "hub"
+    },
+    {
+      "from": "nginx",
+      "to": "caddy",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "h2i",
+      "to": "caddy",
+      "label": "内部域名",
+      "variant": "security"
+    },
+    {
+      "from": "caddy",
+      "to": "launcher"
+    },
+    {
+      "from": "hub",
+      "to": "pgc"
+    },
+    {
+      "from": "launcher",
+      "to": "pgl"
+    },
+    {
+      "from": "legacy",
+      "to": "hostpg"
+    },
+    {
+      "from": "legacy",
+      "to": "nas",
+      "label": "媒体",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "hub",
+      "to": "hostpg",
+      "label": "清洗依赖",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "amber",
+      "title": "结构问题",
+      "items": [
+        "所有东西一个节点，没有资源边界",
+        "数据位置由 fstab 的 bind 挂载决定",
+        "备份和原件在同一台机器"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "不能碰的",
+      "items": [
+        "MX-H2I 现有登录和联网",
+        "L1 的部署脚本要求集群只有 1 个节点"
+      ]
+    }
+  ]
+}

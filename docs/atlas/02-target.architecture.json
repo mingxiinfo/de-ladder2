@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "目标 · 两个集群并存（阶段 A）",
+    "subtitle": "设计，没有在任何集群上部署过",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/atlas/02-target.html"
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [
+      40,
+      90
+    ],
+    "cols": 6,
+    "gapX": 64,
+    "gapY": 64,
+    "cellW": 176,
+    "cellH": 80
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "公网用户",
+      "sublabel": "",
+      "row": 0,
+      "col": 0
+    },
+    {
+      "id": "edge",
+      "type": "cloud",
+      "label": "边缘入口",
+      "sublabel": "Domestic · 以后多台",
+      "row": 0,
+      "col": 1
+    },
+    {
+      "id": "n2",
+      "type": "backend",
+      "label": "s2 宿主机 Nginx",
+      "sublabel": "80 端口唯一主人",
+      "row": 0,
+      "col": 2
+    },
+    {
+      "id": "gpub",
+      "type": "security",
+      "label": "Gateway public",
+      "sublabel": "NodePort 30080",
+      "row": 0,
+      "col": 3
+    },
+    {
+      "id": "apps",
+      "type": "backend",
+      "label": "业务命名空间",
+      "sublabel": "Hub · DataPort · Pay · Rig",
+      "row": 0,
+      "col": 4
+    },
+    {
+      "id": "pg",
+      "type": "database",
+      "label": "CloudNativePG",
+      "sublabel": "pg-common · pg-pay",
+      "row": 0,
+      "col": 5
+    },
+    {
+      "id": "lan",
+      "type": "frontend",
+      "label": "H2I 用户 · 办公网",
+      "sublabel": "分流 DNS 不变",
+      "row": 2,
+      "col": 0
+    },
+    {
+      "id": "s1in",
+      "type": "backend",
+      "label": "s1 入口",
+      "sublabel": "Nginx 80 · Caddy 8008",
+      "row": 2,
+      "col": 2
+    },
+    {
+      "id": "gint",
+      "type": "security",
+      "label": "Gateway internal",
+      "sublabel": "NodePort 30081",
+      "row": 1,
+      "col": 3
+    },
+    {
+      "id": "plat",
+      "type": "backend",
+      "label": "平台服务",
+      "sublabel": "ES · HanLP · GPU 模型",
+      "row": 1,
+      "col": 4
+    },
+    {
+      "id": "bak",
+      "type": "cloud",
+      "label": "备份",
+      "sublabel": "本机 → NAS → OSS",
+      "row": 2,
+      "col": 5
+    },
+    {
+      "id": "s1",
+      "type": "backend",
+      "label": "s1 原集群",
+      "sublabel": "Launcher · H2I · 外部项目",
+      "row": 2,
+      "col": 3
+    },
+    {
+      "id": "nas",
+      "type": "database",
+      "label": "NAS 32T",
+      "sublabel": "冷存储 · 备份",
+      "row": 3,
+      "col": 5
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "s2 · 新集群 kubeadm v1.36",
+      "wraps": [
+        "n2",
+        "gpub",
+        "gint",
+        "apps",
+        "plat",
+        "pg"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "s1 · 不调整",
+      "wraps": [
+        "s1in",
+        "s1"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "user",
+      "to": "edge",
+      "label": "TLS",
+      "variant": "emphasis"
+    },
+    {
+      "from": "edge",
+      "to": "n2",
+      "label": "WireGuard",
+      "variant": "emphasis"
+    },
+    {
+      "from": "n2",
+      "to": "gpub"
+    },
+    {
+      "from": "gpub",
+      "to": "apps"
+    },
+    {
+      "from": "apps",
+      "to": "pg"
+    },
+    {
+      "from": "lan",
+      "to": "s1in",
+      "label": "内部域名",
+      "variant": "security"
+    },
+    {
+      "from": "s1in",
+      "to": "gint",
+      "label": "转到 s2",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "from": "gint",
+      "to": "apps",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "from": "s1in",
+      "to": "s1",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "apps",
+      "to": "plat",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "pg",
+      "to": "bak",
+      "label": "每天",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "bak",
+      "to": "nas",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "怎么分担",
+      "items": [
+        "按服务分：重的搬到 s2，s1 只减不增",
+        "一次迁一个服务，切一个域名"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "没有的",
+      "items": [
+        "没有自动高可用：控制面只有 s2",
+        "靠备份和 manage.sh 还原兜底"
+      ]
+    }
+  ]
+}

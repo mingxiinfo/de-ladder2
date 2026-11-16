@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+---
+# 公网入口：边缘 Nginx 经隧道、宿主机 Nginx 转来的流量。TLS 在边缘终结，这里只有 HTTP。
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: public
+  namespace: gateway
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              ladder2/gateway: enabled     # 平台建命名空间时打
+---
+# 内网专属入口：只接内网 LAN 和 H2I 用户（docs/18）。
+# 一个应用只想对内网开放，就只把 HTTPRoute 挂到这个 Gateway 上。
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: internal
+  namespace: gateway
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: http
+      port: 8080            # 和 public 不同，方便各自映射 NodePort
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              ladder2/gateway: enabled

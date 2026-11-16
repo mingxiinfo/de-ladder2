@@ -1,0 +1,37 @@
+# 新集群第一个控制面（s2）。用法见 docs/14 第 6 节（已按 docs/16 修订）。没有实测。
+# kubeadm init --config kubeadm-init.yaml --upload-certs
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.1.4        # s2 的 LAN 地址（inventory/hosts.yaml）
+  bindPort: 6443
+nodeRegistration:
+  name: CHANGE-ME                      # 改：s2 的主机名
+  criSocket: unix:///run/containerd/containerd.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v1.36.CHANGE-ME     # 改：补丁版本与 s1 的 kubectl version 一致
+clusterName: ladder2
+# 固定的名字，不是某台机器的地址。各节点 /etc/hosts 里把它指向 s2。
+# 设了这一项，以后加控制面不用重建集群（docs/16）。
+controlPlaneEndpoint: k8s-api.ladder2.internal:6443
+networking:
+  podSubnet: 10.244.0.0/16             # 与 versions.env 的 POD_CIDR 一致
+  serviceSubnet: 10.96.0.0/12          # 与 versions.env 的 SERVICE_CIDR 一致
+apiServer:
+  certSANs:
+    - k8s-api.ladder2.internal
+    - 192.168.1.4
+    - 10.88.88.89                      # 改：s2 的 WireGuard 地址（待确认）
+etcd:
+  local:
+    dataDir: /var/lib/etcd             # 单独的逻辑卷，或单独的系统 SSD（docs/16）
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+# 磁盘到 85% 开始回收镜像，留出处理时间（告警线 70%，行动线 80%，docs/20）。
+imageGCHighThresholdPercent: 85
+imageGCLowThresholdPercent: 75
+containerLogMaxSize: 50Mi
+containerLogMaxFiles: 5

@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data
+---
+# 共享数据库集群：Hub、DataPort 各一个库一个角色（docs/06）。支付用单独的 pg-pay，不放这里。
+# 现在一个实例。备份走 docs/19 的 pg_dump / pg_basebackup，不依赖对象存储。
+# 有第二个节点后把 instances 改成 2，CloudNativePG 会建从库并在主库故障时切换。
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg-common
+  namespace: data
+spec:
+  instances: 1
+  storage:
+    size: 200Gi
+    storageClass: local-path     # local-path-provisioner，数据在节点的 /data/k8s/storage
+  # requests 和 limits 相同：数据库不和别的 Pod 抢资源。数字沿用 L1 的 mx-common-postgres。
+  resources:
+    requests:
+      cpu: "16"
+      memory: 48Gi
+    limits:
+      cpu: "16"
+      memory: 48Gi
+  bootstrap:
+    initdb:
+      database: mx_insight_hub
+      owner: mx_insight_hub

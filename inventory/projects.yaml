@@ -1,0 +1,159 @@
+# 项目登记。本工程不拷贝这些项目的源码，只记录它们在哪、怎么部署、谁负责、迁移到哪一步。
+# class:
+#   platform  本工程自己负责（集群、网关、数据面、基础服务）
+#   mx        level-1 仓库里的 MX 项目，源码留在原仓库
+#   external  别人的项目或暂时不上 k8s 的程序，只登记、只读探测
+# l2_state: l1-only（只在 s1 运行）| planned | migrating | l2（已在新集群）| stays（不迁）
+roots:
+  l1: /Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr
+  dock: /Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock
+  mingxi: /Users/qpjoy/workspace/mingxi
+  deploy_repo: /Users/qpjoy/workspace/mingxi/de-mingxi
+
+projects:
+  mx-launcher:
+    class: mx
+    path: dock/mx-launcher
+    what: MX-H2I 全部功能、用户中心 / SSO、产品网络、Release Center、Internal 应用网关（Caddy）
+    runtime: k8s，namespace mx-internal-shadow；自己的 PostgreSQL
+    manage: scripts/manage.sh ops internal-production deploy
+    docs: docs/（00-63，历史设计和最新理念，可在构建过程中更新）
+    demos:
+      mx-h2i: 以 Internal 为操作面中心，所有配置都在 Internal
+      luopan: 使用 standalone launcher 的 quasar 项目，用来测 launcher 的网络、权限、用户
+    hard_rule: 任何改动不得影响 MX-H2I 现有用户登录和现有联网
+    l2_state: l1-only
+    migrate_order: 最后
+
+  mx-insight-hub:
+    class: mx
+    path: dock/mx-insight-hub
+    what: 数据中心。数据接入、治理、检索、租户、计费
+    runtime: k8s，namespace mx-insight-hub，六个工作负载；用 mx-common 的 PG / ES / Redis
+    depends: [mx-common, hanlp, mx-embedding, mx-pay, mx-launcher(SSO), night-all(过渡), 宿主机 PG 5432]
+    manage: scripts/manage.sh deploy
+    note: 逐步把依赖 Night-All 的接口迁进 Hub
+    l2_state: planned
+
+  mx-dataport:
+    class: mx
+    path: dock/mx-dataport
+    what: 数港
+    runtime: k8s，单副本 Recreate；用 mx-common 的 PG
+    l2_state: planned
+
+  mx-common:
+    class: platform
+    path: dock/mx-common
+    what: 共享数据面（PostgreSQL 16 / Elasticsearch / Redis / HanLP）和 npm 包（连接、迁移、队列、SSO 库）
+    runtime: k8s，namespace mx-common，hostPath PV
+    l2_state: planned
+    l2_target: 数据库改由 CloudNativePG 声明；npm 包不变
+
+  mx-pay:
+    class: mx
+    path: dock/mx-base/mx-pay
+    what: 支付中心。要求独立、稳定、方便其他应用调用；已在 Hub 和 DataPort 使用
+    runtime: k8s，namespace mx-pay，专用 PostgreSQL，默认端口 18230
+    l2_state: planned
+    note: 专用数据库不与别的产品合并
+
+  mx-rig:
+    class: mx
+    path: dock/mx-rig
+    what: 测试中心。mx-auto-server 和 mx-test-framework 已整合进来
+    runtime: k8s，namespace mx-rig，自己的 PostgreSQL
+    l2_state: planned
+
+  mx-static:
+    class: platform
+    path: dock/mx-base/mx-static
+    what: NAS 迁移工具 + 静态文件服务（writer 18200 / reader 18201）
+    runtime: Docker Compose
+    state: NAS 迁移已完成；静态文件服务没有上线
+    l2_state: planned
+    note: 定位改为可选的基础服务，不是读写 NAS 的必经之路（docs/20）
+
+  mx-move:
+    class: platform
+    path: dock/mx-base/mx-move
+    what: s1 上 etcd 和 k8s 数据目录的迁移工具（Docker volumes 迁盘，后来转 NAS 方案）
+    state: 2026-10-20 全量迁移已完成
+    l2_state: stays
+    note: 只服务于 s1 的 kubeadm 布局。新集群不用它，但它的事务、校验、保留旧副本的做法要沿用
+
+  mx-embedding:
+    class: platform
+    path: dock/mx-base/mx-embedding
+    what: Qwen3-Embedding-0.6B 向量服务，127.0.0.1:18210；Hub 高级搜索的向量化和 RAG 在用
+    runtime: Docker Compose，GPU
+    state: 试用一段时间后因磁盘读写问题停掉；空间和磁盘富余后可能重开
+    l2_state: planned
+
+  mx-ocr:
+    class: platform
+    path: dock/mx-base/mx-ocr
+    what: 图片文字提取，0.0.0.0:8710，GPU
+    state: 能部署，没有集成到工具里
+    l2_state: planned
+
+  mx-device:
+    class: mx
+    path: dock/mx-base/mx-device
+    runtime: Docker Compose
+    l2_state: l1-only
+
+  mx-crawler-runner:
+    class: mx
+    path: dock/mx-base/mx-crawler-runner
+    what: Hub 的采集 runner，在 Hub 之后单独发布
+    l2_state: l1-only
+
+  tunnel-cli:
+    class: platform
+    path: l1/electron-plugin/packages/tunnel-cli
+    what: qp-tunnel-cli，OpenVPN mesh（100.127.0.0/24，instance mx）
+    docs: openvpn.setup.md
+    l2_state: stays
+
+  host-pg:
+    class: platform
+    path: l1
+    what: s1 宿主机 PostgreSQL 16（127.0.0.1:5432）。Night-All / po-infra 的源数据，Hub 的清洗计划依赖它
+    runtime: s1 的 systemd 服务 postgresql-16
+    l2_state: planned
+    note: 要搬成集群里一个有名字的服务。放 s2 本机盘还是 NAS 取决于库的大小，未知（docs/20）
+
+  night-all:
+    class: external
+    path: mingxi/Night-All
+    what: 旧数据源和调用接口。docs 是之前的实现，specs 是后续规划
+    runtime: 宿主机进程 / Docker，控制台 18141
+    l2_state: stays
+    exit: Hub 逐个能力接管后退役
+
+  po-backend-java:
+    class: external
+    path: mingxi/po-backend-java
+    what: Luopan 业务后端（Java）
+    runtime: 待确认（仓库里有 Dockerfile 和 nginx.conf）
+    l2_state: stays
+
+  po-infra:
+    class: external
+    path: mingxi/po-infra
+    what: Django + Celery（web、多个 worker、beat、websearch）+ postgres + redis
+    runtime: Docker Compose
+    l2_state: stays
+
+  luopan:
+    class: external
+    path: mingxi/luopan/po-frontend
+    what: 线上 Luopan 桌面端（quasar + electron），用 standalone launcher SDK
+    note: 只保护它用到的接口，不改它的代码
+
+  de-mingxi:
+    class: external
+    path: mingxi/de-mingxi
+    what: 部署仓。compass/deploy 是 Domestic 的 443 网关和 Internal 的 Nginx 配置
+    note: 各项目的可部署清单规划在本工程的 projects/<项目>/（docs/10 的修订说明）

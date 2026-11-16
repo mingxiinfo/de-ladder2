@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "机器的四种角色",
+    "subtitle": "只有同一个 LAN 里的服务器进集群；node prepare / join 还没实现",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/atlas/04-roles.html"
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [
+      40,
+      90
+    ],
+    "cols": 5,
+    "gapX": 64,
+    "gapY": 64,
+    "cellW": 176,
+    "cellH": 80
+  },
+  "components": [
+    {
+      "id": "e1",
+      "type": "cloud",
+      "label": "edge · Domestic",
+      "sublabel": "Nginx · WireGuard",
+      "row": 0,
+      "col": 0
+    },
+    {
+      "id": "e2",
+      "type": "cloud",
+      "label": "edge · 新增入口",
+      "sublabel": "DNS 分流，不设主控",
+      "row": 0,
+      "col": 1
+    },
+    {
+      "id": "sc",
+      "type": "cloud",
+      "label": "site · 国内云",
+      "sublabel": "Compose · 缓存",
+      "row": 0,
+      "col": 3
+    },
+    {
+      "id": "so",
+      "type": "cloud",
+      "label": "site · 海外站点",
+      "sublabel": "页面 · 只读副本",
+      "row": 0,
+      "col": 4
+    },
+    {
+      "id": "ctl",
+      "type": "security",
+      "label": "control · s2",
+      "sublabel": "控制面 · 主控",
+      "row": 1,
+      "col": 2
+    },
+    {
+      "id": "oss",
+      "type": "external",
+      "label": "OSS + CDN",
+      "sublabel": "公开文件 · 备份",
+      "row": 1,
+      "col": 4
+    },
+    {
+      "id": "node",
+      "type": "backend",
+      "label": "node · s1",
+      "sublabel": "阶段 B 才加入",
+      "row": 2,
+      "col": 1
+    },
+    {
+      "id": "nas",
+      "type": "database",
+      "label": "NAS",
+      "sublabel": "冷存储",
+      "row": 2,
+      "col": 3
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Internal · 一个 LAN",
+      "wraps": [
+        "ctl",
+        "node",
+        "nas"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "ctl",
+      "to": "e1",
+      "label": "SSH 配置",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "bottom"
+    },
+    {
+      "from": "ctl",
+      "to": "e2",
+      "label": "SSH 配置",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "from": "ctl",
+      "to": "sc",
+      "label": "SSH 配置",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "from": "ctl",
+      "to": "node",
+      "label": "kubeadm join",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "ctl",
+      "to": "oss",
+      "label": "同步公开文件",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "so",
+      "to": "oss",
+      "label": "读",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "ctl",
+      "to": "nas",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "数据往外推",
+      "items": [
+        "站点读 OSS 和本地副本",
+        "不跨隧道挂载 NAS，不逐页查内网主库"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "不进集群的原因",
+      "items": [
+        "公网链路抖动会让节点反复被驱逐",
+        "公网机器不放进控制面"
+      ]
+    }
+  ]
+}
