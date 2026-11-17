@@ -4,6 +4,6 @@ services:
   ladder2-design:
     network_mode: bridge
     ports:
-      - "${DESIGN_BIND:-127.0.0.1}:${DESIGN_PORT:-18310}:${DESIGN_PORT:-18310}"
+      - "${DESIGN_BIND:-0.0.0.0}:${DESIGN_PORT:-18310}:${DESIGN_PORT:-18310}"
     environment:
       DESIGN_LISTEN: "${DESIGN_PORT:-18310}"

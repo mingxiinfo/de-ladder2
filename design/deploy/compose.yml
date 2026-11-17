@@ -1,5 +1,5 @@
 # 架构图站点的公共部分。用 ./scripts/manage.sh design up 启动，它会叠加下面两个文件之一：
-#   compose.host.yml    Linux 服务器（默认）：host 网络，只听 127.0.0.1。不新建 Docker 网络，不加 iptables 规则
+#   compose.host.yml    Linux 服务器（默认）：host 网络，监听地址见 design.env。不新建 Docker 网络，不加 iptables 规则
 #   compose.bridge.yml  macOS 开发机：Docker 自带的默认 bridge 加端口映射。也不新建网络
 # 不让 Compose 建项目自己的网络：s1 上已有的网段太多，Docker 找不到不重叠的地址池（docs/31）。
 services:
@@ -14,8 +14,8 @@ services:
       - /tmp
       - /etc/nginx/conf.d
     healthcheck:
-      # 按容器实际的监听地址探测：带地址的（host 网络）直接用，只有端口的（bridge）用 127.0.0.1
-      test: ["CMD-SHELL", "l=$$DESIGN_LISTEN; case $$l in *:*) a=$$l ;; *) a=127.0.0.1:$$l ;; esac; wget -qO- http://$$a/healthz >/dev/null || exit 1"]
+      # 按容器实际的监听地址探测：0.0.0.0 和只有端口的（bridge）用 127.0.0.1，具体地址（host 网络）直接用
+      test: ["CMD-SHELL", "l=$$DESIGN_LISTEN; case $$l in 0.0.0.0:*) a=127.0.0.1:$${l#*:} ;; *:*) a=$$l ;; *) a=127.0.0.1:$$l ;; esac; wget -qO- http://$$a/healthz >/dev/null || exit 1"]
       interval: 30s
       timeout: 3s
     labels:

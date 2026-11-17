@@ -629,7 +629,7 @@ design_proxy_prepare() { # design_proxy_prepare <基础镜像>
 # 网络模式（docs/31）。都不新建 Docker 网络：s1 上 Docker 找不到不重叠的地址池，建网络会失败。
 #   host    Linux 服务器默认。Nginx 直接在宿主机上监听 DESIGN_BIND:端口，不加 iptables 规则
 #   bridge  macOS 默认。Docker Desktop 的 host 网络不通到 Mac 本机，只能用默认 bridge 加端口映射
-# DESIGN_NETWORK=host|bridge 可以强制指定。DESIGN_BIND 默认 127.0.0.1；改成 LAN 地址就是对内网开放，要用户明确决定。
+# DESIGN_NETWORK=host|bridge 可以强制指定。监听地址 DESIGN_BIND 默认 0.0.0.0（design.env，用户 2026-11-17 决定），可用环境变量覆盖。
 design_network() {
   if [[ -n "${DESIGN_NETWORK:-}" ]]; then
     [[ "$DESIGN_NETWORK" == host || "$DESIGN_NETWORK" == bridge ]] || die "DESIGN_NETWORK 只能是 host 或 bridge"
@@ -642,8 +642,32 @@ design_compose() {
   # shellcheck source=/dev/null
   source "$DESIGN_ENV"
   local mode; mode="$(design_network)"
-  DESIGN_IMAGE="ladder2-design:latest" DESIGN_PORT="${DESIGN_PORT:-18310}" DESIGN_BIND="${DESIGN_BIND:-127.0.0.1}" \
+  DESIGN_IMAGE="ladder2-design:latest" DESIGN_PORT="${DESIGN_PORT:-18310}" DESIGN_BIND="${DESIGN_BIND:-0.0.0.0}" \
     docker compose -p ladder2-design -f design/deploy/compose.yml -f "design/deploy/compose.$mode.yml" "$@"
+}
+
+design_reach_hint() { # design_reach_hint <监听地址> <端口>：从别的机器怎么打开；防火墙只查不改
+  local bind="$1" port="$2" ips="" ip
+  if [[ "$bind" == 127.0.0.1 ]]; then
+    echo "  ${D}只听本机回环。从自己电脑看：ssh -L $port:127.0.0.1:$port <这台机器>，再打开 http://127.0.0.1:$port/${O}"
+    return 0
+  fi
+  if [[ "$bind" == 0.0.0.0 ]]; then
+    if hostname -I >/dev/null 2>&1; then ips="$(hostname -I)"
+    elif command -v ipconfig >/dev/null; then ips="$(ipconfig getifaddr en0 2>/dev/null || true)"; fi
+    echo "  听所有网卡（包括 WireGuard、OpenVPN 这类隧道网卡）。从其他机器打开："
+    for ip in $ips; do [[ "$ip" == *:* ]] || echo "    http://$ip:$port/"; done
+  else
+    echo "  从其他机器打开：http://$bind:$port/"
+  fi
+  # 防火墙：只查询，不放行。放行是改 iptables，由人决定（CLAUDE.md）
+  if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    if firewall-cmd --query-port="$port/tcp" >/dev/null 2>&1; then ok "firewalld 已放行 $port/tcp"
+    else warn "firewalld 在运行，没有放行 $port/tcp，其他机器可能打不开。要放行由你执行：firewall-cmd --add-port=$port/tcp（加 --permanent 再 --reload 才在重启后保留）"; fi
+  elif command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ufw status 2>/dev/null | grep -qE "^$port(/tcp)? +ALLOW"; then ok "ufw 已放行 $port/tcp"
+    else warn "ufw 在运行，没有放行 $port/tcp，其他机器可能打不开。要放行由你执行：ufw allow $port/tcp"; fi
+  fi
 }
 
 design_port_free() { # design_port_free <端口>：host 网络下启动前确认没人占用
@@ -682,23 +706,23 @@ cmd_design() {
       docker image inspect ladder2-design:latest >/dev/null 2>&1 || die "没有镜像 ladder2-design:latest。先 design build，或 docker load 导入。"
       docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ladder2-design:latest | grep -q '^DESIGN_LISTEN=' \
         || die "ladder2-design:latest 是旧版本的镜像（监听地址写死在镜像里）。先 git pull，再 design build。"
-      local mode bind="${DESIGN_BIND:-127.0.0.1}" i
+      local mode bind="${DESIGN_BIND:-0.0.0.0}" probe i
       mode="$(design_network)"
+      probe="$bind"
+      if [[ "$bind" == 0.0.0.0 ]]; then probe=127.0.0.1; fi   # 听所有网卡时从本机回环探测
       if [[ "$mode" == host ]]; then design_port_free "$port"; fi
       echo "  网络：$mode；监听 $bind:$port。不新建 Docker 网络$([[ "$mode" == host ]] && echo "，不加 iptables 规则")"
       design_compose up -d --pull never
       for i in 1 2 3 4 5 6 7 8 9 10; do
-        curl -fsS --max-time 2 "http://$bind:$port/healthz" >/dev/null 2>&1 && break
+        curl -fsS --max-time 2 "http://$probe:$port/healthz" >/dev/null 2>&1 && break
         sleep 1
       done
-      if curl -fsS --max-time 2 "http://$bind:$port/healthz" >/dev/null 2>&1; then
-        echo "  ${G}✓${O} 已启动：http://$bind:$port/"
-        if [[ "$bind" == 127.0.0.1 ]]; then
-          echo "  ${D}只听本机回环。从自己电脑看：ssh -L $port:127.0.0.1:$port <这台机器>，再打开 http://127.0.0.1:$port/${O}"
-        fi
+      if curl -fsS --max-time 2 "http://$probe:$port/healthz" >/dev/null 2>&1; then
+        echo "  ${G}✓${O} 已启动：http://$probe:$port/"
+        design_reach_hint "$bind" "$port"
       else
         docker logs --tail 20 ladder2-design 2>&1 | sed 's/^/    /'
-        die "容器起来了，但 http://$bind:$port/healthz 不通。上面是容器最后 20 行日志。"
+        die "容器起来了，但 http://$probe:$port/healthz 不通。上面是容器最后 20 行日志。"
       fi ;;
     stop)
       design_need_docker
@@ -713,6 +737,7 @@ cmd_design() {
       # host 网络时 DESIGN_LISTEN 就是宿主机上的地址；bridge 时它只是容器里的端口，宿主机上的地址看端口映射
       if [[ -n "$addr" && "$addr" != *:* ]]; then addr="$(docker port ladder2-design "$addr/tcp" 2>/dev/null | head -1)"; fi
       [[ -n "$addr" ]] || addr="127.0.0.1:$port"
+      if [[ "$addr" == 0.0.0.0:* ]]; then addr="127.0.0.1:${addr#0.0.0.0:}"; fi   # 听所有网卡时从本机回环探测
       echo "  容器：$st；网络：$net；镜像：$(docker inspect -f '{{.Config.Image}}' ladder2-design)"
       if curl -fsS --max-time 3 "http://$addr/healthz" >/dev/null 2>&1; then ok "http://$addr/healthz"
       else bad "http://$addr/healthz 不通"; fi

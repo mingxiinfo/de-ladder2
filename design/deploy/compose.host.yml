@@ -1,6 +1,6 @@
-# Linux 服务器：和宿主机共用网络，Nginx 直接监听 DESIGN_BIND:DESIGN_PORT（默认 127.0.0.1:18310）。
+# Linux 服务器：和宿主机共用网络，Nginx 直接监听 DESIGN_BIND:DESIGN_PORT（默认 0.0.0.0:18310，见 design.env）。
 services:
   ladder2-design:
     network_mode: host
     environment:
-      DESIGN_LISTEN: "${DESIGN_BIND:-127.0.0.1}:${DESIGN_PORT:-18310}"
+      DESIGN_LISTEN: "${DESIGN_BIND:-0.0.0.0}:${DESIGN_PORT:-18310}"
