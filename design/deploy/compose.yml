@@ -1,16 +1,22 @@
-# 架构图站点。用 ./scripts/manage.sh design up 启动，不要直接 docker compose up（镜像标签由 manage.sh 决定）。
-# 只监听本机回环地址，由 host-nginx 转发；只对内网开放（docs/31）。
+# 架构图站点的公共部分。用 ./scripts/manage.sh design up 启动，它会叠加下面两个文件之一：
+#   compose.host.yml    Linux 服务器（默认）：host 网络，只听 127.0.0.1。不新建 Docker 网络，不加 iptables 规则
+#   compose.bridge.yml  macOS 开发机：Docker 自带的默认 bridge 加端口映射。也不新建网络
+# 不让 Compose 建项目自己的网络：s1 上已有的网段太多，Docker 找不到不重叠的地址池（docs/31）。
 services:
   ladder2-design:
     image: ${DESIGN_IMAGE:-ladder2-design:latest}
     container_name: ladder2-design
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:${DESIGN_PORT:-18310}:8080"
     read_only: true
     tmpfs:
       - /var/cache/nginx
       - /var/run
       - /tmp
+      - /etc/nginx/conf.d
+    healthcheck:
+      # 按容器实际的监听地址探测：带地址的（host 网络）直接用，只有端口的（bridge）用 127.0.0.1
+      test: ["CMD-SHELL", "l=$$DESIGN_LISTEN; case $$l in *:*) a=$$l ;; *) a=127.0.0.1:$$l ;; esac; wget -qO- http://$$a/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
     labels:
       ladder2.project: design

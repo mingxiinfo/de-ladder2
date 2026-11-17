@@ -1,0 +1,9 @@
+# macOS 开发机：Docker Desktop 的 host 网络默认不通到 Mac 本机，用默认 bridge 加端口映射。
+# network_mode: bridge 用的是 Docker 自带的 docker0，不新建网络。
+services:
+  ladder2-design:
+    network_mode: bridge
+    ports:
+      - "${DESIGN_BIND:-127.0.0.1}:${DESIGN_PORT:-18310}:${DESIGN_PORT:-18310}"
+    environment:
+      DESIGN_LISTEN: "${DESIGN_PORT:-18310}"

@@ -54,8 +54,6 @@ hosts:
     gpus: 现在没有。规划从 s1 移 2 块 RTX 5090 过来（docs/21）
     nas_mount: /mnt/nas（与 s1 同参数）
     k8s: kubeadm v1.36，flannel，controlPlaneEndpoint k8s-api.ladder2.internal
-    listen_planned:
-      18310: 架构图站点 ladder2-design（Docker，只监听 127.0.0.1，host-nginx 转发，只对内网）。docs/31
 
   nas:
     name: nas-storage

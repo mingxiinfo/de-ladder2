@@ -5,7 +5,7 @@ de-llaaddddeerr 的第二层：集群架构、自身业务、整套架构的知�
 ## 开始任何工作之前
 
 - 接着上次做：先读 `docs/29`（现在到哪了、下一步做什么）。
-- 读 `docs/README.md` 找到相关的那篇文档。架构决策都在 `docs/01`–`31`。当前整体设计的图在 `design/architecture/`，站点（演变时间线）在 `design/site/`，打成 Docker 镜像见 `docs/31`。两处说法不一致时以编号大的为准，旧文档的状态行标明了哪部分被取代。
+- 读 `docs/README.md` 找到相关的那篇文档。架构决策都在 `docs/01`–`30`。当前整体设计的图在 `design/architecture/`。`design/site/`、`design/deploy/` 是查看这些文档和图的站点，只是工具，不属于 L2 架构（`docs/32`）。两处说法不一致时以编号大的为准，旧文档的状态行标明了哪部分被取代。
 - 机器和项目的事实只在 `inventory/hosts.yaml` 和 `inventory/projects.yaml`。标着"待确认"的字段不是事实。
 - 还没决定和还没验证的事在 `docs/15`。碰到它们先问，不要自己假设。
 
@@ -73,6 +73,7 @@ Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节
 - NAS 迁移做完了不等于 mx-static 服务上线了。服务没上线。
 - 两台服务器做不出自动高可用（etcd 要 3 个成员）。不要放两个控制面；已决定不设见证机，靠备份还原兜底（`docs/16`、`docs/19`）。
 - **s2 不能加入 s1 的集群**：L1 的 Launcher 身份、Hub、DataPort、mx-common 部署脚本都要求节点数为 1（`docs/16` 有清单）。
+- s1 上不要新建 Docker 网络：默认地址池都和已有网段重叠，`docker compose` 建网络会失败（2026-11-17 在 s1 上看到）。要在 s1 上跑容器（比如查看站点），用 host 网络、只听 `127.0.0.1`（`docs/31`）。
 - NAS 是 32T（已用 6.5T），不是 36T 或 48T。
 - GPU 一共 4 块 RTX 5090，现在全在 s1（编号 0–3）。以后怎么分不固定，用户说先不考虑，不要排进计划（`docs/27`）。
 - 部署清单都在本工程：L2 自己负责的服务（迁过来的 MX 项目、平台服务）在 `services/`，别人的业务项目在 `projects/`（`docs/27`）。`de-mingxi` 是上一版的部署仓，只引用，不往里加 L2 的东西。
@@ -80,7 +81,8 @@ Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节
 - Hysteria2 是代理，不是网络：不能用它挂 NAS 或做数据库复制。Oversea 要用的数据从内往外推，不从外往里拉（`docs/24`）。
 - 数据库不合并成一个实例：按"坏了影响谁"分（Launcher 的库、`pg-pay`、`pg-common`、`host-pg`）。平台管实例、备份、监控，表结构归业务（`docs/27`）。
 - 运维面是一组（暂名 `mx-ops`）：L2 控制台、Headlamp、Prometheus、Grafana、黑盒探测、Jenkins。Jenkins 不再算 mx-base 的东西（`docs/30`）。
-- 改了架构要同步三处：新增 `docs/NN`、改 `design/architecture/` 的源并 `diagrams`、改 `design/site/timeline.json`。然后 `design build`。
+- 改了架构要同步三处：新增 `docs/NN`、改 `design/architecture/` 的源并 `diagrams`、改 `design/site/timeline.json`。想在查看站点里看到，再 `design build`。
+- 查看站点（`design/`）不进架构：不登记到 `inventory/`，不接 host-nginx 和 Gateway，不画进架构图，版本号在 `design/deploy/design.env`（`docs/32`）。
 - 内网带宽约 300 Mbps：公网入口最多加到三台；备份上传和 Oversea 同步要限速（`docs/30`）。
 - 采集、存储、告警用 Prometheus 这一套，不让 Launcher 自己做；Launcher 是门面，不是集群的控制面（`docs/28`）。
 - 经 Domestic 的代理和用户流量共用 100 Mbps，订阅要限速；视频和大文件对外走 OSS 加 CDN（`docs/27`）。

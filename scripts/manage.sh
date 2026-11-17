@@ -45,7 +45,7 @@ ${B}写入${O}（必须指名目标）
   app diff|apply <项目> [环境] --context <名字>      对比 / 部署一个项目
   run <项目> <命令...>                               转调该项目自己的 scripts/manage.sh
   diagrams [名字]                                    用 archify 生成 docs/atlas 和 design/architecture 的图
-  design stage|serve|build|up|stop|status|export     架构图站点：组装、预览、打镜像、在本机启动（docs/31）
+  design stage|serve|build|up|stop|status|export     查看设计文档的站点（工具，不属于架构）：组装、预览、打镜像、启动（docs/31、32）
                             内网服务器出网：PROXY=http://127.0.0.1:7788 ./scripts/manage.sh design build
 
 ${D}还没实现：node prepare|join、backup run|verify、restore、loadtest（docs/17、docs/19）；控制台（docs/26）${O}
@@ -143,7 +143,7 @@ cmd_check() {
   done < <(grep -oE '\]\([^)#:]+\.md\)' -r docs README.md CLAUDE.md 2>/dev/null | sed -E 's/\]\(([^)]+)\)/\1/')
   ok "Markdown 相对链接"
 
-  echo "${B}架构图站点${O}"
+  echo "${B}查看站点${O}"
   if python3 -m json.tool design/site/timeline.json >/dev/null 2>&1; then ok "design/site/timeline.json 是合法的 JSON"
   else bad "design/site/timeline.json 不是合法的 JSON"; fi
 
@@ -557,9 +557,11 @@ probe_diff() { # probe_diff <名字> <外层合计> <里层合计>
 }
 
 # ---------- design ----------
-# 架构图站点（docs/31）：design/ 下的首页、演变时间线和 Archify 图，打包成一个 Nginx 镜像。
+# 查看设计文档和架构图的站点（docs/31、32）：design/ 下的首页、演变时间线和 Archify 图，打包成一个 Nginx 镜像。
+# 它是本工程的工具，不属于 L2 架构：不登记到 inventory，不接 host-nginx 和 Gateway，版本号在 design/deploy/design.env。
 
 DESIGN_BUILD="design/.build"
+DESIGN_ENV="design/deploy/design.env"
 
 design_stage() { # 把站点需要的文件组装到 design/.build/html
   local out="$DESIGN_BUILD/html" f href missing=0
@@ -569,7 +571,7 @@ design_stage() { # 把站点需要的文件组装到 design/.build/html
   cp console/ui-design/dist/tokens.css "$out/ui/"
   for f in design/architecture/*.html; do [[ -e "$f" ]] && cp "$f" "$out/diagrams/"; done
   for f in docs/atlas/*.html; do [[ -e "$f" && "$(basename "$f")" != index.html ]] && cp "$f" "$out/atlas/"; done
-  cp design/deploy/nginx.conf "$DESIGN_BUILD/"
+  cp design/deploy/default.conf.template "$DESIGN_BUILD/"
   local rev="未提交"
   rev="$(git rev-parse --short HEAD 2>/dev/null || echo 未提交)"
   [[ -n "$(git status --porcelain -- design docs/atlas 2>/dev/null)" ]] && rev="$rev（有未提交的改动）"
@@ -624,17 +626,40 @@ design_proxy_prepare() { # design_proxy_prepare <基础镜像>
   docker pull "$img" || die "拉不到基础镜像 $img。$(design_pull_help "$img")"
 }
 
+# 网络模式（docs/31）。都不新建 Docker 网络：s1 上 Docker 找不到不重叠的地址池，建网络会失败。
+#   host    Linux 服务器默认。Nginx 直接在宿主机上监听 DESIGN_BIND:端口，不加 iptables 规则
+#   bridge  macOS 默认。Docker Desktop 的 host 网络不通到 Mac 本机，只能用默认 bridge 加端口映射
+# DESIGN_NETWORK=host|bridge 可以强制指定。DESIGN_BIND 默认 127.0.0.1；改成 LAN 地址就是对内网开放，要用户明确决定。
+design_network() {
+  if [[ -n "${DESIGN_NETWORK:-}" ]]; then
+    [[ "$DESIGN_NETWORK" == host || "$DESIGN_NETWORK" == bridge ]] || die "DESIGN_NETWORK 只能是 host 或 bridge"
+    echo "$DESIGN_NETWORK"
+  elif [[ "$(uname -s)" == Darwin ]]; then echo bridge
+  else echo host; fi
+}
+
 design_compose() {
   # shellcheck source=/dev/null
-  source "$K8S/versions.env"
-  DESIGN_IMAGE="ladder2-design:latest" DESIGN_PORT="${DESIGN_PORT:-18310}" \
-    docker compose -p ladder2-design -f design/deploy/compose.yml "$@"
+  source "$DESIGN_ENV"
+  local mode; mode="$(design_network)"
+  DESIGN_IMAGE="ladder2-design:latest" DESIGN_PORT="${DESIGN_PORT:-18310}" DESIGN_BIND="${DESIGN_BIND:-127.0.0.1}" \
+    docker compose -p ladder2-design -f design/deploy/compose.yml -f "design/deploy/compose.$mode.yml" "$@"
+}
+
+design_port_free() { # design_port_free <端口>：host 网络下启动前确认没人占用
+  local port="$1" used
+  if docker inspect -f '{{.State.Running}}' ladder2-design 2>/dev/null | grep -q true; then return 0; fi   # 是它自己在用
+  if ! command -v ss >/dev/null; then warn "没有 ss 命令，跳过端口检查"; return 0; fi
+  used="$(ss -ltnpH "sport = :$port" 2>/dev/null || true)"
+  [[ -z "$used" ]] || die "端口 $port 已经有程序在监听，不启动：
+$used
+  换端口改 design/deploy/design.env 的 DESIGN_PORT，再 design up。"
 }
 
 cmd_design() {
   local sub="${1:-}"; shift || true
   # shellcheck source=/dev/null
-  source "$K8S/versions.env"
+  source "$DESIGN_ENV"
   local port="${DESIGN_PORT:-18310}"
   case "$sub" in
     stage) design_stage ;;
@@ -650,12 +675,31 @@ cmd_design() {
       design_proxy_prepare "$DESIGN_NGINX_IMAGE"
       docker build ${DESIGN_PROXY_ARGS[@]+"${DESIGN_PROXY_ARGS[@]}"} --build-arg "NGINX_IMAGE=$DESIGN_NGINX_IMAGE" -f design/deploy/Dockerfile \
         -t "ladder2-design:$tag" -t ladder2-design:latest "$DESIGN_BUILD"
-      echo "  ${G}✓${O} 镜像 ladder2-design:$tag（同时标为 latest）" ;;
+      echo "  ${G}✓${O} 镜像 ladder2-design:$tag（同时标为 latest）"
+      echo "  只是打好了镜像，还没有运行。启动：./scripts/manage.sh design up" ;;
     up)
       design_need_docker
       docker image inspect ladder2-design:latest >/dev/null 2>&1 || die "没有镜像 ladder2-design:latest。先 design build，或 docker load 导入。"
+      docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ladder2-design:latest | grep -q '^DESIGN_LISTEN=' \
+        || die "ladder2-design:latest 是旧版本的镜像（监听地址写死在镜像里）。先 git pull，再 design build。"
+      local mode bind="${DESIGN_BIND:-127.0.0.1}" i
+      mode="$(design_network)"
+      if [[ "$mode" == host ]]; then design_port_free "$port"; fi
+      echo "  网络：$mode；监听 $bind:$port。不新建 Docker 网络$([[ "$mode" == host ]] && echo "，不加 iptables 规则")"
       design_compose up -d --pull never
-      echo "  ${G}✓${O} 已启动，本机 http://127.0.0.1:$port/ 。对内网开放见 design/deploy/host-nginx.conf.example" ;;
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        curl -fsS --max-time 2 "http://$bind:$port/healthz" >/dev/null 2>&1 && break
+        sleep 1
+      done
+      if curl -fsS --max-time 2 "http://$bind:$port/healthz" >/dev/null 2>&1; then
+        echo "  ${G}✓${O} 已启动：http://$bind:$port/"
+        if [[ "$bind" == 127.0.0.1 ]]; then
+          echo "  ${D}只听本机回环。从自己电脑看：ssh -L $port:127.0.0.1:$port <这台机器>，再打开 http://127.0.0.1:$port/${O}"
+        fi
+      else
+        docker logs --tail 20 ladder2-design 2>&1 | sed 's/^/    /'
+        die "容器起来了，但 http://$bind:$port/healthz 不通。上面是容器最后 20 行日志。"
+      fi ;;
     stop)
       design_need_docker
       design_compose stop ;;
@@ -663,9 +707,15 @@ cmd_design() {
       design_need_docker
       local st; st="$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' ladder2-design 2>/dev/null)" \
         || { echo "  未部署（这台机器上没有 ladder2-design 容器）"; return 0; }
-      echo "  容器：$st；镜像：$(docker inspect -f '{{.Config.Image}}' ladder2-design)"
-      if curl -fsS --max-time 3 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then ok "http://127.0.0.1:$port/healthz"
-      else bad "http://127.0.0.1:$port/healthz 不通"; fi
+      local addr net
+      net="$(docker inspect -f '{{.HostConfig.NetworkMode}}' ladder2-design)"
+      addr="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ladder2-design | sed -n 's/^DESIGN_LISTEN=//p')"
+      # host 网络时 DESIGN_LISTEN 就是宿主机上的地址；bridge 时它只是容器里的端口，宿主机上的地址看端口映射
+      if [[ -n "$addr" && "$addr" != *:* ]]; then addr="$(docker port ladder2-design "$addr/tcp" 2>/dev/null | head -1)"; fi
+      [[ -n "$addr" ]] || addr="127.0.0.1:$port"
+      echo "  容器：$st；网络：$net；镜像：$(docker inspect -f '{{.Config.Image}}' ladder2-design)"
+      if curl -fsS --max-time 3 "http://$addr/healthz" >/dev/null 2>&1; then ok "http://$addr/healthz"
+      else bad "http://$addr/healthz 不通"; fi
       if (( FAILED )); then exit 1; fi ;;
     export)
       design_need_docker
@@ -675,7 +725,7 @@ cmd_design() {
       docker save ladder2-design:latest | gzip > "$f"
       echo "  ${G}✓${O} $f（$(du -h "$f" | cut -f1)）"
       echo "  在服务器上：gunzip -c <文件> | docker load，然后 ./scripts/manage.sh design up" ;;
-    *) die "用法：design stage | serve [端口] | build | up | stop | status | export（docs/31）" ;;
+    *) die "用法：design stage | serve [端口] | build | up | stop | status | export（docs/31、32）" ;;
   esac
 }
 

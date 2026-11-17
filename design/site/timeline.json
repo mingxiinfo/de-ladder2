@@ -15,9 +15,16 @@
         "MX-H2I 的登录和联网在这里，任何改动都不能影响它"
       ],
       "diagrams": [
-        { "title": "现状：一台服务器上的一切", "href": "atlas/01-current.html" }
+        {
+          "title": "现状：一台服务器上的一切",
+          "href": "atlas/01-current.html"
+        }
       ],
-      "docs": ["01", "16", "20"]
+      "docs": [
+        "01",
+        "16",
+        "20"
+      ]
     },
     {
       "id": "stage-a",
@@ -33,11 +40,26 @@
         "数据库按“坏了影响谁”分实例；备份每天写 NAS，每周加密传 OSS"
       ],
       "diagrams": [
-        { "title": "全景：流量怎么进来，东西在哪", "href": "diagrams/01-overview.html" },
-        { "title": "接入方式：宿主机、Docker、Kubernetes、业务项目", "href": "diagrams/02-onboarding.html" },
-        { "title": "两个集群并存（第二轮的版本）", "href": "atlas/02-target.html" }
+        {
+          "title": "全景：流量怎么进来，东西在哪",
+          "href": "diagrams/01-overview.html"
+        },
+        {
+          "title": "接入方式：宿主机、Docker、Kubernetes、业务项目",
+          "href": "diagrams/02-onboarding.html"
+        },
+        {
+          "title": "两个集群并存（第二轮的版本）",
+          "href": "atlas/02-target.html"
+        }
       ],
-      "docs": ["16", "18", "22", "23", "27"]
+      "docs": [
+        "16",
+        "18",
+        "22",
+        "23",
+        "27"
+      ]
     },
     {
       "id": "stage-b",
@@ -52,9 +74,16 @@
         "两台做不到控制面自动切换，靠备份和还原兜底"
       ],
       "diagrams": [
-        { "title": "阶段 B：一个集群两台", "href": "diagrams/04-stage-b.html" }
+        {
+          "title": "阶段 B：一个集群两台",
+          "href": "diagrams/04-stage-b.html"
+        }
       ],
-      "docs": ["16", "21", "22"]
+      "docs": [
+        "16",
+        "21",
+        "22"
+      ]
     },
     {
       "id": "stage-c",
@@ -69,21 +98,63 @@
         "海外站点的数据从内网往外推，不从外往里拉"
       ],
       "diagrams": [
-        { "title": "阶段 C：三台控制面", "href": "diagrams/05-stage-c.html" },
-        { "title": "全部阶段一张图", "href": "diagrams/03-evolution.html" }
+        {
+          "title": "阶段 C：三台控制面",
+          "href": "diagrams/05-stage-c.html"
+        },
+        {
+          "title": "全部阶段一张图",
+          "href": "diagrams/03-evolution.html"
+        }
       ],
-      "docs": ["16", "17", "24", "30"]
+      "docs": [
+        "16",
+        "17",
+        "24",
+        "30"
+      ]
     }
   ],
   "references": [
-    { "title": "备份与一键还原", "href": "atlas/03-backup.html" },
-    { "title": "机器的四种角色", "href": "atlas/04-roles.html" }
+    {
+      "title": "备份与一键还原",
+      "href": "atlas/03-backup.html"
+    },
+    {
+      "title": "机器的四种角色",
+      "href": "atlas/04-roles.html"
+    }
   ],
   "rounds": [
-    { "round": "第一轮", "date": "2026-11-16", "docs": "01–15", "decisions": "目标架构分层、四层入口、迁移路线 P0–P8、项目接入约定。集群发行版当时选的 k3s，后来改了" },
-    { "round": "第二轮", "date": "2026-11-17", "docs": "16–20", "decisions": "改用 kubeadm、不设见证机、s1 暂不调整；公网和内网两个 Gateway；备份到 NAS 和 OSS；磁盘增长和数据放置" },
-    { "round": "第三轮", "date": "2026-11-17", "docs": "21–26", "decisions": "命名沿用 L1；host-nginx 和 Gateway 两层；Hysteria2 与“数据从内往外推”；NAS 的三种读法；管理面和链路探测" },
-    { "round": "第四轮", "date": "2026-11-17", "docs": "27–29", "decisions": "经 Domestic 出网用订阅；自己的服务和业务项目分目录；数据库按影响分实例；Launcher 只当门面" },
-    { "round": "第五轮", "date": "2026-11-17", "docs": "30–31", "decisions": "运维面 mx-ops（含 Jenkins）；内网约 300 Mbps；架构图做成可部署的站点" }
+    {
+      "round": "第一轮",
+      "date": "2026-11-16",
+      "docs": "01–15",
+      "decisions": "目标架构分层、四层入口、迁移路线 P0–P8、项目接入约定。集群发行版当时选的 k3s，后来改了"
+    },
+    {
+      "round": "第二轮",
+      "date": "2026-11-17",
+      "docs": "16–20",
+      "decisions": "改用 kubeadm、不设见证机、s1 暂不调整；公网和内网两个 Gateway；备份到 NAS 和 OSS；磁盘增长和数据放置"
+    },
+    {
+      "round": "第三轮",
+      "date": "2026-11-17",
+      "docs": "21–26",
+      "decisions": "命名沿用 L1；host-nginx 和 Gateway 两层；Hysteria2 与“数据从内往外推”；NAS 的三种读法；管理面和链路探测"
+    },
+    {
+      "round": "第四轮",
+      "date": "2026-11-17",
+      "docs": "27–29",
+      "decisions": "经 Domestic 出网用订阅；自己的服务和业务项目分目录；数据库按影响分实例；Launcher 只当门面"
+    },
+    {
+      "round": "第五轮",
+      "date": "2026-11-17",
+      "docs": "30",
+      "decisions": "运维面 mx-ops（含 Jenkins）；内网约 300 Mbps；当前设计画成五张架构图"
+    }
   ]
 }

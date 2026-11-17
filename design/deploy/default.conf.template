@@ -1,6 +1,11 @@
 # 容器里的 Nginx。只发静态文件，不转发任何东西。
+# 启动时由官方镜像的 20-envsubst-on-templates.sh 渲染到 /etc/nginx/conf.d/（compose 里是 tmpfs）。
+# 只替换 DESIGN_ 开头的环境变量（NGINX_ENVSUBST_FILTER），$uri 这类 Nginx 变量原样保留。
+# DESIGN_LISTEN 由 manage.sh 决定（docs/31）：
+#   host 网络（Linux 服务器）  127.0.0.1:18310  只听本机回环，不建 Docker 网络、不加 iptables 规则
+#   bridge 网络（开发机）       18310            容器自己的网络里监听，由端口映射接到本机 127.0.0.1
 server {
-    listen 8080;
+    listen ${DESIGN_LISTEN};
     server_name _;
     root /usr/share/nginx/html;
     index index.html;

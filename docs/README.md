@@ -36,9 +36,10 @@
 | 28 | [监控、Launcher 的角色与自动化](28.monitoring-launcher-role-and-automation.md) | Prometheus 这一套重不重；Launcher 该不该当控制面；自动化和测试放哪 |
 | 29 | [交接](29.handoff-and-next-steps.md) | 现在到哪了；下次从哪继续 |
 | 30 | [运维面、带宽、架构图](30.ops-plane-jenkins-uplink-and-architecture-diagrams.md) | Jenkins 归到运维面 `mx-ops`；内网 300 Mbps 意味着什么；`design/architecture/` 的三张图 |
-| 31 | [架构图站点](31.design-site-docker.md) | `design/` 打成 Docker 镜像；演变时间线；怎么更新；图上的措辞 |
+| 31 | [查看站点（工具）](31.design-site-docker.md) | `design/` 打成 Docker 镜像；演变时间线；怎么更新；图上的措辞 |
+| 32 | [查看站点不属于架构](32.design-site-is-a-tool.md) | 站点只是看文档和图的工具：不登记、不接入口、不画进架构图 |
 
-**接着做：先读 29，再读 30、31。** 第一次读：01 → 16 → 21 → 27 → 03 → 17 → 11。要动手：14 → 19 → 22 → 12。
+**接着做：先读 29，再读 30。** 31、32 讲的是查看文档用的站点，不是架构。 第一次读：01 → 16 → 21 → 27 → 03 → 17 → 11。要动手：14 → 19 → 22 → 12。
 
 03–14 是第一轮设计，16–20 是第二轮，21–26 是第三轮，27–28 是第四轮。被后面取代的部分在各自的状态行里标明了。两处说法不一致时以编号大的为准。
 
