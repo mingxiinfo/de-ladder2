@@ -1,0 +1,264 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "接入方式 · 宿主机、Docker、Kubernetes、业务项目",
+  "subtitle": "设计（docs/10、21、23、27），没有实测",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "output": "design/architecture/02-onboarding.html"
+ },
+ "layout": {
+  "mode": "grid",
+  "origin": [
+   40,
+   90
+  ],
+  "cols": 5,
+  "gapX": 64,
+  "gapY": 64,
+  "cellW": 184,
+  "cellH": 80
+ },
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "业务项目进集群",
+   "items": [
+    "平台建命名空间、配额、数据库",
+    "项目自己写清单和路由，自己发布"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "不想容器化的",
+   "items": [
+    "原样跑在宿主机或 Compose",
+    "host-nginx 加一个域名文件转到它的端口"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "迁进和回退",
+   "items": [
+    "改 host-nginx 的一行：转本机端口 ↔ 转 Gateway",
+    "秒级生效"
+   ]
+  }
+ ],
+ "components": [
+  {
+   "id": "hn",
+   "type": "backend",
+   "label": "host-nginx :80",
+   "sublabel": "每个域名一个配置文件",
+   "row": 1,
+   "col": 0
+  },
+  {
+   "id": "gpub",
+   "type": "security",
+   "label": "Gateway public",
+   "sublabel": "公网可达的域名",
+   "row": 0,
+   "col": 1
+  },
+  {
+   "id": "gint",
+   "type": "security",
+   "label": "Gateway internal",
+   "sublabel": "只对内的域名",
+   "row": 1,
+   "col": 1
+  },
+  {
+   "id": "fwd",
+   "type": "backend",
+   "label": "本机端口转发",
+   "sublabel": "proxy_pass 127.0.0.1:端口",
+   "row": 2,
+   "col": 1
+  },
+  {
+   "id": "svc",
+   "type": "backend",
+   "label": "services/<名字>",
+   "sublabel": "MX 项目 · HTTPRoute",
+   "row": 0,
+   "col": 2
+  },
+  {
+   "id": "proj",
+   "type": "backend",
+   "label": "projects/<项目>",
+   "sublabel": "协作业务 · k8s 部署",
+   "row": 1,
+   "col": 2
+  },
+  {
+   "id": "compose",
+   "type": "backend",
+   "label": "Docker Compose 应用",
+   "sublabel": "deploy/compose",
+   "row": 2,
+   "col": 2
+  },
+  {
+   "id": "proc",
+   "type": "backend",
+   "label": "宿主机进程",
+   "sublabel": "deploy/systemd",
+   "row": 3,
+   "col": 2
+  },
+  {
+   "id": "pg",
+   "type": "database",
+   "label": "pg-common · pg-pay",
+   "sublabel": "每个服务一个库",
+   "row": 0,
+   "col": 3
+  },
+  {
+   "id": "pgapps",
+   "type": "database",
+   "label": "pg-apps",
+   "sublabel": "业务各一个库 · 互不影响",
+   "row": 1,
+   "col": 3
+  },
+  {
+   "id": "nas",
+   "type": "database",
+   "label": "NAS 目录",
+   "sublabel": "/mnt/nas/<项目>",
+   "row": 2,
+   "col": 3
+  },
+  {
+   "id": "tpl",
+   "type": "frontend",
+   "label": "templates/project",
+   "sublabel": "拷一份改名字",
+   "row": 0,
+   "col": 4
+  },
+  {
+   "id": "manage",
+   "type": "frontend",
+   "label": "manage.sh app apply",
+   "sublabel": "必须带 --context",
+   "row": 1,
+   "col": 4
+  },
+  {
+   "id": "jenkins",
+   "type": "frontend",
+   "label": "Jenkins · 人 · 按钮",
+   "sublabel": "都调同一条命令",
+   "row": 2,
+   "col": 4
+  },
+  {
+   "id": "reg",
+   "type": "backend",
+   "label": "内网镜像仓库",
+   "sublabel": "多节点前必须有",
+   "row": 3,
+   "col": 4
+  }
+ ],
+ "connections": [
+  {
+   "from": "hn",
+   "to": "gpub",
+   "label": "进了集群",
+   "variant": "emphasis"
+  },
+  {
+   "from": "hn",
+   "to": "gint"
+  },
+  {
+   "from": "hn",
+   "to": "fwd",
+   "label": "没进集群"
+  },
+  {
+   "from": "gpub",
+   "to": "svc",
+   "label": "HTTPRoute",
+   "variant": "emphasis"
+  },
+  {
+   "from": "gint",
+   "to": "proj",
+   "label": "HTTPRoute"
+  },
+  {
+   "from": "fwd",
+   "to": "compose"
+  },
+  {
+   "from": "fwd",
+   "to": "proc"
+  },
+  {
+   "from": "svc",
+   "to": "pg"
+  },
+  {
+   "from": "proj",
+   "to": "pgapps"
+  },
+  {
+   "from": "compose",
+   "to": "nas"
+  },
+  {
+   "from": "tpl",
+   "to": "manage"
+  },
+  {
+   "from": "jenkins",
+   "to": "manage",
+   "label": "触发"
+  },
+  {
+   "from": "manage",
+   "to": "pgapps",
+   "label": "命名空间 · 配额 · 库"
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "region",
+   "label": "进集群：提交清单和 HTTPRoute",
+   "wraps": [
+    "gpub",
+    "gint",
+    "svc",
+    "proj"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "不进集群：留在宿主机，只登记和转发",
+   "wraps": [
+    "fwd",
+    "compose",
+    "proc"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "怎么部署",
+   "wraps": [
+    "tpl",
+    "manage",
+    "jenkins",
+    "reg"
+   ]
+  }
+ ]
+}

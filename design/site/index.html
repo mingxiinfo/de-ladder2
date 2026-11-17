@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>de-ladder2 架构</title>
+<link rel="stylesheet" href="ui/tokens.css">
+<style>
+  :root {
+    --page: var(--qp-bg-1); --panel: var(--qp-bg-2); --raised: var(--qp-bg-3);
+    --ink: var(--qp-text-1); --mute: var(--qp-text-2); --faint: var(--qp-text-3);
+    --line: var(--qp-line); --accent: var(--qp-primary); --warn: var(--qp-warning); --ok: var(--qp-success);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 15px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 28px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 24px; }
+  h1 { margin: 0; font-size: 26px; letter-spacing: .01em; }
+  .lead { margin: 6px 0 0; color: var(--mute); max-width: 760px; }
+  .build { color: var(--faint); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h2 { font-size: 17px; margin: 36px 0 12px; }
+
+  /* 演变时间线 */
+  .steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
+  .steps li { position: relative; }
+  .steps li:not(:last-child)::after { content: ""; position: absolute; top: 19px; left: calc(50% + 22px); right: calc(-50% + 22px);
+                                      height: 2px; background: var(--line); }
+  .step { all: unset; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%;
+          text-align: center; padding: 0 6px 4px; border-radius: 8px; }
+  .step:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .dot { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-weight: 600; font-size: 14px;
+         background: var(--raised); border: 2px solid var(--line); color: var(--mute); }
+  .step .name { font-weight: 600; }
+  .step .when { color: var(--faint); font-size: 12px; }
+  .step[aria-current="step"] .dot { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 4px var(--qp-light-5); }
+  .step[aria-current="step"] .name { color: var(--accent); }
+
+  /* 当前阶段 */
+  .stage { margin-top: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  .stage-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .stage-head h3 { margin: 0; font-size: 20px; }
+  .tag { font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid currentColor; }
+  .tag.live { color: var(--ok); } .tag.plan { color: var(--warn); }
+  .stage p { color: var(--mute); margin: 10px 0; }
+  .stage ul { margin: 0 0 14px; padding-left: 20px; }
+  .stage li { margin: 4px 0; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 12px; }
+  .tab { all: unset; cursor: pointer; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--raised); font-size: 14px; }
+  .tab[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .frame-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: var(--faint); }
+  .frame-bar a { color: var(--accent); }
+  iframe { width: 100%; height: min(78vh, 900px); border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  .docs { font-size: 13px; color: var(--faint); margin-top: 10px; }
+  code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* 设计演变 */
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--faint); font-weight: 500; font-size: 13px; }
+  td.nowrap { white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  .refs { display: flex; flex-wrap: wrap; gap: 10px; }
+  .refs a { color: var(--ink); text-decoration: none; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .refs a:hover { border-color: var(--accent); }
+  .error { padding: 16px; border: 1px solid var(--qp-danger); border-radius: 8px; color: var(--mute); }
+
+  @media (max-width: 720px) {
+    .steps { grid-template-columns: repeat(2, 1fr); row-gap: 16px; }
+    .steps li::after { display: none; }
+    table, tbody, tr, td { display: block; } thead { display: none; }
+    td { border-bottom: 0; padding: 4px 12px; } tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
+    iframe { height: 70vh; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1 id="title">de-ladder2 架构</h1>
+      <p class="lead" id="subtitle"></p>
+    </div>
+    <div class="build" id="build"></div>
+  </header>
+
+  <section aria-label="演变过程">
+    <ol class="steps" id="steps"></ol>
+    <article class="stage" id="stage" aria-live="polite"></article>
+  </section>
+
+  <h2>设计是怎么一步步定下来的</h2>
+  <table>
+    <thead><tr><th>轮次</th><th>日期</th><th>文档</th><th>定了什么</th></tr></thead>
+    <tbody id="rounds"></tbody>
+  </table>
+
+  <h2>参考图</h2>
+  <div class="refs" id="refs"></div>
+</div>
+
+<script>
+(function () {
+  // 浅色系统主题时用 Neon Void 的浅色版本
+  try {
+    if (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) {
+      document.documentElement.classList.add('qp-theme-neon-void-light');
+    }
+  } catch (e) {}
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, attrs, text) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+    if (text != null) n.textContent = text;
+    return n;
+  };
+
+  function showStage(data, id) {
+    const i = Math.max(0, data.stages.findIndex((s) => s.id === id));
+    const s = data.stages[i];
+    document.querySelectorAll('.step').forEach((b, j) => {
+      if (j === i) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current');
+    });
+    const box = $('stage');
+    box.replaceChildren();
+    const head = el('div', { class: 'stage-head' });
+    head.append(el('h3', {}, s.name + ' · ' + s.title));
+    head.append(el('span', { class: 'tag ' + (s.status === '现役' ? 'live' : 'plan') }, s.status));
+    box.append(head, el('p', {}, s.summary));
+    const ul = el('ul');
+    s.points.forEach((p) => ul.append(el('li', {}, p)));
+    box.append(ul);
+
+    const tabs = el('div', { class: 'tabs', role: 'tablist' });
+    const bar = el('div', { class: 'frame-bar' });
+    const frame = el('iframe', { title: '架构图', loading: 'lazy' });
+    const open = el('a', { target: '_blank', rel: 'noopener' }, '新窗口打开');
+    const label = el('span');
+    bar.append(label, open);
+    const pick = (d, btn) => {
+      tabs.querySelectorAll('.tab').forEach((t) => t.setAttribute('aria-selected', String(t === btn)));
+      frame.src = d.href; open.href = d.href; label.textContent = d.title;
+    };
+    s.diagrams.forEach((d, k) => {
+      const b = el('button', { class: 'tab', role: 'tab', type: 'button' }, d.title);
+      b.addEventListener('click', () => pick(d, b));
+      tabs.append(b);
+      if (k === 0) setTimeout(() => pick(d, b));
+    });
+    box.append(tabs, bar, frame);
+    box.append(el('div', { class: 'docs' }, '依据：docs/' + s.docs.join('、docs/')));
+    if (location.hash !== '#' + s.id) history.replaceState(null, '', '#' + s.id);
+  }
+
+  function render(data) {
+    $('title').textContent = data.title;
+    document.title = data.title;
+    $('subtitle').textContent = data.subtitle;
+    const steps = $('steps');
+    data.stages.forEach((s, i) => {
+      const li = el('li');
+      const b = el('button', { class: 'step', type: 'button' });
+      b.append(el('span', { class: 'dot' }, String(i)), el('span', { class: 'name' }, s.name), el('span', { class: 'when' }, s.when));
+      b.addEventListener('click', () => showStage(data, s.id));
+      li.append(b);
+      steps.append(li);
+    });
+    showStage(data, location.hash.slice(1));
+    window.addEventListener('hashchange', () => showStage(data, location.hash.slice(1)));
+
+    const tb = $('rounds');
+    data.rounds.forEach((r) => {
+      const tr = el('tr');
+      tr.append(el('td', { class: 'nowrap' }, r.round), el('td', { class: 'nowrap' }, r.date),
+                el('td', { class: 'nowrap' }, r.docs), el('td', {}, r.decisions));
+      tb.append(tr);
+    });
+    const refs = $('refs');
+    data.references.forEach((r) => refs.append(el('a', { href: r.href, target: '_blank', rel: 'noopener' }, r.title)));
+  }
+
+  fetch('timeline.json', { cache: 'no-cache' })
+    .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(render)
+    .catch((e) => {
+      $('stage').replaceChildren(el('div', { class: 'error' },
+        '读不到 timeline.json（' + e.message + '）。直接双击打开文件时浏览器不允许读取，请用 ./scripts/manage.sh design serve 预览。'));
+    });
+
+  fetch('build.json', { cache: 'no-cache' })
+    .then((r) => r.ok ? r.json() : null)
+    .then((b) => { if (b) $('build').textContent = '生成于 ' + b.built_at + (b.revision ? ' · ' + b.revision : ''); })
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>

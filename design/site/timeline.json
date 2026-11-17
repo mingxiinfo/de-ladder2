@@ -1,0 +1,89 @@
+{
+  "title": "de-ladder2 架构",
+  "subtitle": "从一台服务器到可扩展的集群：现状、各阶段的目标形态和每一轮设计的决定。图上的内容都是设计，除非标着“现役”。",
+  "stages": [
+    {
+      "id": "now",
+      "name": "现状",
+      "title": "L1 · 一台服务器上的一切",
+      "when": "现在",
+      "status": "现役",
+      "summary": "s1 上的单节点 kubeadm 集群承载 Launcher、MX-H2I、Hub、DataPort、mx-pay 和 mx-common。公网流量经 Domestic 的 Nginx 和 WireGuard 进来。",
+      "points": [
+        "内存和磁盘都用到约 60%，增长快",
+        "L1 的部署脚本要求单节点，s2 不能直接加入这个集群",
+        "MX-H2I 的登录和联网在这里，任何改动都不能影响它"
+      ],
+      "diagrams": [
+        { "title": "现状：一台服务器上的一切", "href": "atlas/01-current.html" }
+      ],
+      "docs": ["01", "16", "20"]
+    },
+    {
+      "id": "stage-a",
+      "name": "阶段 A",
+      "title": "两个集群并存，一个服务一个服务地搬",
+      "when": "s2 到位后",
+      "status": "设计",
+      "summary": "s2 建新的 kubeadm 集群，先把备份做好，再逐个迁入服务。s1 只减不增，Launcher 最后迁。",
+      "points": [
+        "外部流量：Domestic Nginx → WireGuard → host-nginx → Gateway public → 服务",
+        "内部流量：办公网和 H2I 用户走 Gateway internal",
+        "不进集群的程序留在宿主机或 Docker，由 host-nginx 转发",
+        "数据库按“坏了影响谁”分实例；备份每天写 NAS，每周加密传 OSS"
+      ],
+      "diagrams": [
+        { "title": "全景：流量怎么进来，东西在哪", "href": "diagrams/01-overview.html" },
+        { "title": "接入方式：宿主机、Docker、Kubernetes、业务项目", "href": "diagrams/02-onboarding.html" },
+        { "title": "两个集群并存（第二轮的版本）", "href": "atlas/02-target.html" }
+      ],
+      "docs": ["16", "18", "22", "23", "27"]
+    },
+    {
+      "id": "stage-b",
+      "name": "阶段 B",
+      "title": "s1 重装后并入，一个集群两台",
+      "when": "Launcher 迁完并验收后",
+      "status": "设计",
+      "summary": "两台服务器都跑服务，一台坏了另一台继续。一级库在 s1 上有副本。控制面仍只有 s2，坏了不能发布但服务不停。",
+      "points": [
+        "两台各有 host-nginx 和服务副本",
+        "一级库（身份、支付、用户数据）流复制到 s1",
+        "两台做不到控制面自动切换，靠备份和还原兜底"
+      ],
+      "diagrams": [
+        { "title": "阶段 B：一个集群两台", "href": "diagrams/04-stage-b.html" }
+      ],
+      "docs": ["16", "21", "22"]
+    },
+    {
+      "id": "stage-c",
+      "name": "阶段 C",
+      "title": "三台控制面，向外加入口和站点",
+      "when": "第三台内网服务器到位后",
+      "status": "设计",
+      "summary": "三台内网服务器各一个 etcd，控制面自动切换。公网入口加到最多三台，面向公众的站点放在公网机器上读本地数据。",
+      "points": [
+        "单个入口 100 Mbps，所有入口回源共用内网约 300 Mbps",
+        "静态、视频和大文件走 OSS + CDN，不回源",
+        "海外站点的数据从内网往外推，不从外往里拉"
+      ],
+      "diagrams": [
+        { "title": "阶段 C：三台控制面", "href": "diagrams/05-stage-c.html" },
+        { "title": "全部阶段一张图", "href": "diagrams/03-evolution.html" }
+      ],
+      "docs": ["16", "17", "24", "30"]
+    }
+  ],
+  "references": [
+    { "title": "备份与一键还原", "href": "atlas/03-backup.html" },
+    { "title": "机器的四种角色", "href": "atlas/04-roles.html" }
+  ],
+  "rounds": [
+    { "round": "第一轮", "date": "2026-11-16", "docs": "01–15", "decisions": "目标架构分层、四层入口、迁移路线 P0–P8、项目接入约定。集群发行版当时选的 k3s，后来改了" },
+    { "round": "第二轮", "date": "2026-11-17", "docs": "16–20", "decisions": "改用 kubeadm、不设见证机、s1 暂不调整；公网和内网两个 Gateway；备份到 NAS 和 OSS；磁盘增长和数据放置" },
+    { "round": "第三轮", "date": "2026-11-17", "docs": "21–26", "decisions": "命名沿用 L1；host-nginx 和 Gateway 两层；Hysteria2 与“数据从内往外推”；NAS 的三种读法；管理面和链路探测" },
+    { "round": "第四轮", "date": "2026-11-17", "docs": "27–29", "decisions": "经 Domestic 出网用订阅；自己的服务和业务项目分目录；数据库按影响分实例；Launcher 只当门面" },
+    { "round": "第五轮", "date": "2026-11-17", "docs": "30–31", "decisions": "运维面 mx-ops（含 Jenkins）；内网约 300 Mbps；架构图做成可部署的站点" }
+  ]
+}

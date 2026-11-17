@@ -27,6 +27,7 @@ de-llaaddddeerr 的第二层：**集群架构、自身业务，以及整套架�
 |---|---|
 | `docs/` | 编号文档 `NN.xxx.md`，新决策新增一篇 |
 | `docs/atlas/` | 图册：Archify 的源文件和生成的 HTML |
+| `design/architecture/` | 当前整体设计的架构图（Archify），三张 |
 | `inventory/` | 主机和项目的登记。事实只写在这里，文档引用它 |
 | `infra/k8s/` | 新集群的清单：kubeadm 配置、两个网关、数据库 |
 | `infra/nginx/` | 边缘和宿主机 Nginx 的样板 |

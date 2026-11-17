@@ -1,0 +1,19 @@
+# design/architecture：当前整体设计的架构图
+
+日期：2026-11-17。状态：五张图都通过了 Archify 的 showcase 校验，都截图看过。画的是设计，不是现状：没有一样在服务器上部署过。内容以 `docs/16`–`31` 为准。站点和镜像见 `docs/31`。
+
+| 文件 | 内容 | 在时间线的哪个阶段 |
+|---|---|---|
+| `01-overview` | 全景：外部和内部流量路径、宿主机 / Docker / Kubernetes 各放什么、s1 和 s2、NAS、OSS、Oversea | 阶段 A |
+| `02-onboarding` | 接入方式：自己的服务、业务项目、Compose、宿主机进程怎么接到 host-nginx 和 Gateway | 阶段 A |
+| `03-evolution` | 全部阶段一张图 | 阶段 C |
+| `04-stage-b` | s1 重装并入，一个集群两台 | 阶段 B |
+| `05-stage-c` | 三台控制面，向外加入口和站点 | 阶段 C |
+
+改图：编辑同名的 `.architecture.json`，或者改 `gen.py` 后在仓库根目录运行 `python3 design/architecture/gen.py`（它会重写全部五个源文件）。然后：
+
+```bash
+./scripts/manage.sh diagrams 04-stage-b
+```
+
+写图的经验在 `docs/13`。另外：一张图的总宽度有上限，七列放不下，六列可以；卡片圆点颜色只能用 cyan、emerald、violet、amber、rose、orange、slate；组件的名字太长会报溢出，缩短或拆到副标题里。

@@ -1,0 +1,16 @@
+# 架构图站点。用 ./scripts/manage.sh design up 启动，不要直接 docker compose up（镜像标签由 manage.sh 决定）。
+# 只监听本机回环地址，由 host-nginx 转发；只对内网开放（docs/31）。
+services:
+  ladder2-design:
+    image: ${DESIGN_IMAGE:-ladder2-design:latest}
+    container_name: ladder2-design
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${DESIGN_PORT:-18310}:8080"
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    labels:
+      ladder2.project: design

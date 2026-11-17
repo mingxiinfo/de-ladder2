@@ -5,7 +5,7 @@ de-llaaddddeerr 的第二层：集群架构、自身业务、整套架构的知�
 ## 开始任何工作之前
 
 - 接着上次做：先读 `docs/29`（现在到哪了、下一步做什么）。
-- 读 `docs/README.md` 找到相关的那篇文档。架构决策都在 `docs/01`–`28`。两处说法不一致时以编号大的为准，旧文档的状态行标明了哪部分被取代。
+- 读 `docs/README.md` 找到相关的那篇文档。架构决策都在 `docs/01`–`31`。当前整体设计的图在 `design/architecture/`，站点（演变时间线）在 `design/site/`，打成 Docker 镜像见 `docs/31`。两处说法不一致时以编号大的为准，旧文档的状态行标明了哪部分被取代。
 - 机器和项目的事实只在 `inventory/hosts.yaml` 和 `inventory/projects.yaml`。标着"待确认"的字段不是事实。
 - 还没决定和还没验证的事在 `docs/15`。碰到它们先问，不要自己假设。
 
@@ -25,6 +25,10 @@ L1 = 现有的单机部署（s1，kubeadm）。L2 = 本工程要建的新集群�
 沿用 L1 的名字，不另起别名：Launcher、Hub、DataPort、mx-common、mx-base 里各服务名；站点 Internal / Domestic / Oversea；宿主机入口 `host-nginx`；L1 的 Caddy 是 `mx-internal-gateway`。只有 L2 新增的东西有新名字（Gateway `public` / `internal`、`pg-common`、`pg-pay`、角色 control / node / site / edge）。站点是机器在哪，角色是它做什么，两回事。"网关"单独出现有歧义，写的时候带上名字（`docs/21`、`docs/23`）。
 
 Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节点）；L2 管机器和集群。前者的东西 L2 不重做。对 L1 的概念或以前的设定不确定时问用户，不要猜：这套方案是一步步调出来的，文档不一定全。
+
+## 图和站点上的措辞
+
+给人看的东西（图、站点、控制台）不用"别人的项目""别人的库"这类见外的说法，用"业务项目""协作业务"或直接写服务名（`docs/31`）。
 
 ## 命令
 
@@ -52,6 +56,7 @@ Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节
 
 ## 改 manage.sh 的规则
 
+- 出网代理用环境变量 `PROXY=http://127.0.0.1:7788`。脚本不自动改 Docker 守护进程的代理：那要重启 `docker.service`，同机的 Compose 应用会跟着重启（`docs/31`）。
 - 只读命令永远不改任何东西，包括不"顺手修复"。
 - 查不到显示 UNKNOWN 并返回非零，不显示成"未部署"。
 - `l1` 子命令只放行只读命令；`run mx-launcher` 只放行只读命令。不要放宽。
@@ -74,6 +79,9 @@ Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节
 - 副本、备份、归档是三种东西。不是每个库都配副本；每日备份直接写 NAS，不落本机盘（`docs/22`）。
 - Hysteria2 是代理，不是网络：不能用它挂 NAS 或做数据库复制。Oversea 要用的数据从内往外推，不从外往里拉（`docs/24`）。
 - 数据库不合并成一个实例：按"坏了影响谁"分（Launcher 的库、`pg-pay`、`pg-common`、`host-pg`）。平台管实例、备份、监控，表结构归业务（`docs/27`）。
+- 运维面是一组（暂名 `mx-ops`）：L2 控制台、Headlamp、Prometheus、Grafana、黑盒探测、Jenkins。Jenkins 不再算 mx-base 的东西（`docs/30`）。
+- 改了架构要同步三处：新增 `docs/NN`、改 `design/architecture/` 的源并 `diagrams`、改 `design/site/timeline.json`。然后 `design build`。
+- 内网带宽约 300 Mbps：公网入口最多加到三台；备份上传和 Oversea 同步要限速（`docs/30`）。
 - 采集、存储、告警用 Prometheus 这一套，不让 Launcher 自己做；Launcher 是门面，不是集群的控制面（`docs/28`）。
 - 经 Domestic 的代理和用户流量共用 100 Mbps，订阅要限速；视频和大文件对外走 OSS 加 CDN（`docs/27`）。
 - 控制面坏了不等于服务停了：已经在跑的 Pod 和网关继续工作。也不会自动切换到另一台（`docs/26`）。

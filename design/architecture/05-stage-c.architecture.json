@@ -1,0 +1,249 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "阶段 C · 三台控制面，向外加入口和站点",
+  "subtitle": "设计（docs/16、17、30），没有实测",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "output": "design/architecture/05-stage-c.html"
+ },
+ "layout": {
+  "mode": "grid",
+  "origin": [
+   40,
+   90
+  ],
+  "cols": 6,
+  "gapX": 56,
+  "gapY": 64,
+  "cellW": 168,
+  "cellH": 80
+ },
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "控制面高可用",
+   "items": [
+    "三台内网服务器各一个 etcd",
+    "坏一台自动切换，不需要人"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "带宽上限",
+   "items": [
+    "单个入口 100 Mbps",
+    "所有入口回源共用内网约 300 Mbps"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "toC 怎么扛量",
+   "items": [
+    "静态和视频走 OSS + CDN",
+    "站点读本地数据，内网只做源头"
+   ]
+  }
+ ],
+ "components": [
+  {
+   "id": "user",
+   "type": "external",
+   "label": "公网用户 · toC",
+   "sublabel": "浏览器 / App",
+   "row": 0,
+   "col": 0
+  },
+  {
+   "id": "partner",
+   "type": "external",
+   "label": "合作方后端",
+   "sublabel": "罗盘 · Delta",
+   "row": 1,
+   "col": 0
+  },
+  {
+   "id": "e1",
+   "type": "cloud",
+   "label": "Domestic 入口 1",
+   "sublabel": "100 Mbps",
+   "row": 0,
+   "col": 1
+  },
+  {
+   "id": "e2",
+   "type": "cloud",
+   "label": "Domestic 入口 2 · 3",
+   "sublabel": "DNS 分流 · 不设主控",
+   "row": 1,
+   "col": 1
+  },
+  {
+   "id": "hn",
+   "type": "backend",
+   "label": "host-nginx × 3",
+   "sublabel": "每台一个 · 互为后备",
+   "row": 0,
+   "col": 2
+  },
+  {
+   "id": "cp1",
+   "type": "security",
+   "label": "s2 · 控制面",
+   "sublabel": "etcd 1/3",
+   "row": 0,
+   "col": 3
+  },
+  {
+   "id": "cp2",
+   "type": "security",
+   "label": "s1 · 控制面",
+   "sublabel": "etcd 2/3",
+   "row": 1,
+   "col": 3
+  },
+  {
+   "id": "cp3",
+   "type": "security",
+   "label": "s3 · 控制面",
+   "sublabel": "etcd 3/3 · 自动切换",
+   "row": 2,
+   "col": 3
+  },
+  {
+   "id": "svc",
+   "type": "backend",
+   "label": "服务 · 多副本",
+   "sublabel": "Hub · DataPort · Launcher",
+   "row": 0,
+   "col": 4
+  },
+  {
+   "id": "pg",
+   "type": "database",
+   "label": "主库 + 副本",
+   "sublabel": "一级二级都配副本",
+   "row": 1,
+   "col": 4
+  },
+  {
+   "id": "gpu",
+   "type": "backend",
+   "label": "GPU 服务",
+   "sublabel": "mx-ocr · mx-embedding · 向量化",
+   "row": 2,
+   "col": 4
+  },
+  {
+   "id": "cdn",
+   "type": "cloud",
+   "label": "OSS + CDN",
+   "sublabel": "静态 · 视频 · 大文件",
+   "row": 0,
+   "col": 5
+  },
+  {
+   "id": "site",
+   "type": "cloud",
+   "label": "toC 站点",
+   "sublabel": "Domestic 或 Oversea · 读本地",
+   "row": 1,
+   "col": 5
+  },
+  {
+   "id": "up",
+   "type": "external",
+   "label": "内网上行",
+   "sublabel": "约 300 Mbps · 总回源上限",
+   "row": 2,
+   "col": 5
+  }
+ ],
+ "connections": [
+  {
+   "from": "user",
+   "to": "e1",
+   "label": "HTTPS",
+   "variant": "emphasis"
+  },
+  {
+   "from": "partner",
+   "to": "e2",
+   "label": "HTTPS"
+  },
+  {
+   "from": "user",
+   "to": "cdn",
+   "label": "静态和视频"
+  },
+  {
+   "from": "e1",
+   "to": "hn",
+   "label": "WireGuard",
+   "variant": "emphasis"
+  },
+  {
+   "from": "e2",
+   "to": "hn"
+  },
+  {
+   "from": "hn",
+   "to": "cp1",
+   "label": "Gateway",
+   "variant": "emphasis"
+  },
+  {
+   "from": "cp1",
+   "to": "svc",
+   "variant": "emphasis"
+  },
+  {
+   "from": "cp2",
+   "to": "pg"
+  },
+  {
+   "from": "cp3",
+   "to": "gpu"
+  },
+  {
+   "from": "pg",
+   "to": "site",
+   "label": "数据往外推"
+  },
+  {
+   "from": "site",
+   "to": "up"
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "region",
+   "label": "Domestic · 入口最多三台",
+   "wraps": [
+    "e1",
+    "e2"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "内网集群 · 三台控制面",
+   "wraps": [
+    "cp1",
+    "cp2",
+    "cp3",
+    "svc",
+    "pg",
+    "gpu"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "向外 · 不进集群",
+   "wraps": [
+    "cdn",
+    "site"
+   ]
+  }
+ ]
+}

@@ -14,3 +14,6 @@ kubeconfig*
 reports/
 docs/atlas/*.visual-check.*
 docs/atlas/*.delivery.json
+design/architecture/*.delivery*.json
+design/.build/
+design/architecture/*.delivery*.json

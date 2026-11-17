@@ -1,0 +1,246 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "阶段 B · s1 重装后并入，一个集群两台",
+  "subtitle": "设计（docs/16、21、22），没有实测",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "output": "design/architecture/04-stage-b.html"
+ },
+ "layout": {
+  "mode": "grid",
+  "origin": [
+   40,
+   90
+  ],
+  "cols": 5,
+  "gapX": 64,
+  "gapY": 64,
+  "cellW": 184,
+  "cellH": 80
+ },
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "得到什么",
+   "items": [
+    "一台机器坏了，服务在另一台继续",
+    "一级库几分钟切到副本"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "还没有的",
+   "items": [
+    "控制面只有 s2：坏了不能发布和调度",
+    "靠备份和 manage.sh 还原兜底"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "前提",
+   "items": [
+    "L1 集群上已经没有在用的服务",
+    "s1 的数据已在 s2 上还原演练过"
+   ]
+  }
+ ],
+ "components": [
+  {
+   "id": "edge",
+   "type": "cloud",
+   "label": "Domestic Nginx",
+   "sublabel": "TLS · WireGuard 回内网",
+   "row": 0,
+   "col": 0
+  },
+  {
+   "id": "office",
+   "type": "frontend",
+   "label": "办公网 · H2I 用户",
+   "sublabel": "分流 DNS · NRPT",
+   "row": 1,
+   "col": 0
+  },
+  {
+   "id": "hn2",
+   "type": "backend",
+   "label": "s2 host-nginx",
+   "sublabel": "systemd · 坏了转 s1",
+   "row": 0,
+   "col": 1
+  },
+  {
+   "id": "hn1",
+   "type": "backend",
+   "label": "s1 host-nginx",
+   "sublabel": "重装后同样的配置",
+   "row": 1,
+   "col": 1
+  },
+  {
+   "id": "gw",
+   "type": "security",
+   "label": "两个 Gateway",
+   "sublabel": "public · internal · 两台都可达",
+   "row": 0,
+   "col": 2
+  },
+  {
+   "id": "ctrl",
+   "type": "security",
+   "label": "控制面 · s2",
+   "sublabel": "etcd 单成员 · 不自动切换",
+   "row": 2,
+   "col": 1
+  },
+  {
+   "id": "ops",
+   "type": "backend",
+   "label": "运维面 mx-ops",
+   "sublabel": "Headlamp · Grafana · Jenkins",
+   "row": 2,
+   "col": 2
+  },
+  {
+   "id": "svc2",
+   "type": "backend",
+   "label": "服务副本 · s2",
+   "sublabel": "Hub · DataPort · mx-pay",
+   "row": 0,
+   "col": 3
+  },
+  {
+   "id": "svc1",
+   "type": "backend",
+   "label": "服务副本 · s1",
+   "sublabel": "同一批服务的另一份",
+   "row": 1,
+   "col": 3
+  },
+  {
+   "id": "launcher",
+   "type": "backend",
+   "label": "Launcher",
+   "sublabel": "已迁入 · H2I 验收通过",
+   "row": 2,
+   "col": 3
+  },
+  {
+   "id": "pgp",
+   "type": "database",
+   "label": "主库 · s2",
+   "sublabel": "pg-common · pg-pay · host-pg",
+   "row": 0,
+   "col": 4
+  },
+  {
+   "id": "pgr",
+   "type": "database",
+   "label": "一级库副本 · s1",
+   "sublabel": "流复制 · 几分钟切换",
+   "row": 1,
+   "col": 4
+  },
+  {
+   "id": "nas",
+   "type": "database",
+   "label": "NAS",
+   "sublabel": "备份直接写 · 冷数据归档",
+   "row": 2,
+   "col": 4
+  }
+ ],
+ "connections": [
+  {
+   "from": "edge",
+   "to": "hn2",
+   "label": "WireGuard",
+   "variant": "emphasis"
+  },
+  {
+   "from": "edge",
+   "to": "hn1",
+   "label": "备用"
+  },
+  {
+   "from": "office",
+   "to": "hn1",
+   "label": "LAN"
+  },
+  {
+   "from": "hn2",
+   "to": "gw",
+   "label": "NodePort",
+   "variant": "emphasis"
+  },
+  {
+   "from": "hn1",
+   "to": "gw"
+  },
+  {
+   "from": "gw",
+   "to": "svc2",
+   "label": "HTTPRoute",
+   "variant": "emphasis"
+  },
+  {
+   "from": "gw",
+   "to": "svc1"
+  },
+  {
+   "from": "gw",
+   "to": "launcher"
+  },
+  {
+   "from": "svc2",
+   "to": "pgp",
+   "variant": "emphasis"
+  },
+  {
+   "from": "svc1",
+   "to": "pgp"
+  },
+  {
+   "from": "pgp",
+   "to": "pgr",
+   "label": "流复制"
+  },
+  {
+   "from": "pgp",
+   "to": "nas",
+   "label": "备份"
+  },
+  {
+   "from": "ctrl",
+   "to": "ops"
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "region",
+   "label": "两台都有入口",
+   "wraps": [
+    "hn2",
+    "hn1"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "服务在两台各一份",
+   "wraps": [
+    "svc2",
+    "svc1"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "一级库有副本",
+   "wraps": [
+    "pgp",
+    "pgr"
+   ]
+  }
+ ]
+}

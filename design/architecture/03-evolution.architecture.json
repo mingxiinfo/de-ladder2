@@ -1,0 +1,277 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "扩容演变 · 从两台到更多",
+  "subtitle": "设计（docs/16、17、21、22），没有实测",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "output": "design/architecture/03-evolution.html"
+ },
+ "layout": {
+  "mode": "grid",
+  "origin": [
+   40,
+   90
+  ],
+  "cols": 4,
+  "gapX": 40,
+  "gapY": 64,
+  "cellW": 176,
+  "cellH": 80
+ },
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "加机器是扩容还是高可用",
+   "items": [
+    "第二台：分担负载，没有自动切换",
+    "第三台内网服务器：控制面才高可用"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "先到的瓶颈",
+   "items": [
+    "Domestic 单台 100 Mbps",
+    "内网上行约 300 Mbps：入口最多加到三台"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "toC",
+   "items": [
+    "站点放公网机器，读本地数据",
+    "内网只做源头，数据往外推"
+   ]
+  }
+ ],
+ "components": [
+  {
+   "id": "a1",
+   "type": "backend",
+   "label": "s1 · L1 集群",
+   "sublabel": "Launcher · H2I · 全部现役",
+   "row": 0,
+   "col": 0
+  },
+  {
+   "id": "a2",
+   "type": "backend",
+   "label": "s2 · 新集群",
+   "sublabel": "控制面 + 逐个迁入的服务",
+   "row": 0,
+   "col": 1
+  },
+  {
+   "id": "a3",
+   "type": "database",
+   "label": "NAS + OSS",
+   "sublabel": "备份先行",
+   "row": 0,
+   "col": 2
+  },
+  {
+   "id": "b1",
+   "type": "backend",
+   "label": "s2 · 控制面",
+   "sublabel": "全部主库和服务",
+   "row": 1,
+   "col": 0
+  },
+  {
+   "id": "b2",
+   "type": "backend",
+   "label": "s1 · 重装为节点",
+   "sublabel": "一级库的副本 · 无状态服务",
+   "row": 1,
+   "col": 1
+  },
+  {
+   "id": "b3",
+   "type": "backend",
+   "label": "GPU 节点",
+   "sublabel": "mx-ocr · mx-embedding 进集群",
+   "row": 1,
+   "col": 2
+  },
+  {
+   "id": "c1",
+   "type": "backend",
+   "label": "s2 · 控制面",
+   "sublabel": "etcd 1/3",
+   "row": 2,
+   "col": 0
+  },
+  {
+   "id": "c2",
+   "type": "backend",
+   "label": "s1 · 控制面",
+   "sublabel": "etcd 2/3",
+   "row": 2,
+   "col": 1
+  },
+  {
+   "id": "c3",
+   "type": "backend",
+   "label": "s3 · 控制面",
+   "sublabel": "etcd 3/3 · 自动切换",
+   "row": 2,
+   "col": 2
+  },
+  {
+   "id": "d1",
+   "type": "cloud",
+   "label": "Domestic 入口 × N",
+   "sublabel": "DNS 分流 · 不设主控",
+   "row": 3,
+   "col": 0
+  },
+  {
+   "id": "d2",
+   "type": "cloud",
+   "label": "toC 站点",
+   "sublabel": "Domestic 或 Oversea · 独立部署",
+   "row": 3,
+   "col": 1
+  },
+  {
+   "id": "d3",
+   "type": "cloud",
+   "label": "OSS + CDN",
+   "sublabel": "静态 · 视频 · 只读副本",
+   "row": 3,
+   "col": 2
+  },
+  {
+   "id": "lim",
+   "type": "external",
+   "label": "上限",
+   "sublabel": "内网上行约 300 Mbps",
+   "row": 3,
+   "col": 3
+  },
+  {
+   "id": "n1",
+   "type": "external",
+   "label": "现在",
+   "sublabel": "两个集群并存",
+   "row": 0,
+   "col": 3
+  },
+  {
+   "id": "n2",
+   "type": "external",
+   "label": "Launcher 迁完后",
+   "sublabel": "一个集群两台",
+   "row": 1,
+   "col": 3
+  },
+  {
+   "id": "n3",
+   "type": "external",
+   "label": "第三台内网服务器",
+   "sublabel": "控制面高可用",
+   "row": 2,
+   "col": 3
+  }
+ ],
+ "connections": [
+  {
+   "from": "a1",
+   "to": "a2",
+   "label": "一次迁一个服务",
+   "variant": "emphasis"
+  },
+  {
+   "from": "a2",
+   "to": "a3",
+   "label": "每日备份"
+  },
+  {
+   "from": "a2",
+   "to": "b1",
+   "label": "s1 迁空",
+   "variant": "emphasis"
+  },
+  {
+   "from": "b1",
+   "to": "b2",
+   "label": "流复制"
+  },
+  {
+   "from": "b2",
+   "to": "b3"
+  },
+  {
+   "from": "b1",
+   "to": "c1",
+   "label": "加第三台",
+   "variant": "emphasis"
+  },
+  {
+   "from": "c1",
+   "to": "c2"
+  },
+  {
+   "from": "c2",
+   "to": "c3"
+  },
+  {
+   "from": "c1",
+   "to": "d1",
+   "label": "入口不够时"
+  },
+  {
+   "from": "d1",
+   "to": "d2"
+  },
+  {
+   "from": "d2",
+   "to": "d3",
+   "label": "数据往外推"
+  },
+  {
+   "from": "d3",
+   "to": "lim"
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "region",
+   "label": "阶段 A",
+   "wraps": [
+    "a1",
+    "a2",
+    "a3"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "阶段 B",
+   "wraps": [
+    "b1",
+    "b2",
+    "b3"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "阶段 C",
+   "wraps": [
+    "c1",
+    "c2",
+    "c3"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "向外扩 · 不进集群",
+   "wraps": [
+    "d1",
+    "d2",
+    "d3"
+   ]
+  }
+ ]
+}

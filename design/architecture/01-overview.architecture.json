@@ -1,0 +1,422 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "L2 全景 · 流量怎么进来，东西在哪",
+  "subtitle": "设计（docs/16–28），没有在任何服务器上部署过",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "output": "design/architecture/01-overview.html"
+ },
+ "layout": {
+  "mode": "grid",
+  "origin": [
+   40,
+   90
+  ],
+  "cols": 6,
+  "gapX": 56,
+  "gapY": 64,
+  "cellW": 168,
+  "cellH": 80
+ },
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "外部流量",
+   "items": [
+    "Domestic Nginx → WireGuard → host-nginx → Gateway public → 服务",
+    "视频和大文件不经 Domestic，走 OSS + CDN"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "内部流量",
+   "items": [
+    "办公网和 H2I 用户走 Gateway internal",
+    "MX-H2I 的登录路径仍在 s1，不改动"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "不进集群的",
+   "items": [
+    "Compose 和宿主机进程由 host-nginx 转到本机端口",
+    "集群重启不影响它们"
+   ]
+  }
+ ],
+ "components": [
+  {
+   "id": "web",
+   "type": "external",
+   "label": "公网用户 · toC",
+   "sublabel": "浏览器 / App",
+   "row": 0,
+   "col": 0
+  },
+  {
+   "id": "partner",
+   "type": "external",
+   "label": "合作方后端",
+   "sublabel": "罗盘 · Delta 调 Hub",
+   "row": 1,
+   "col": 0
+  },
+  {
+   "id": "h2i",
+   "type": "frontend",
+   "label": "MX-H2I 桌面端",
+   "sublabel": "产品网络 · 不改动",
+   "row": 3,
+   "col": 0
+  },
+  {
+   "id": "office",
+   "type": "frontend",
+   "label": "办公网 / 内部用户",
+   "sublabel": "LAN 直连",
+   "row": 2,
+   "col": 0
+  },
+  {
+   "id": "dnginx",
+   "type": "cloud",
+   "label": "Domestic Nginx",
+   "sublabel": "TLS · SNI 分域名 · 限流",
+   "row": 0,
+   "col": 1
+  },
+  {
+   "id": "wg",
+   "type": "security",
+   "label": "WireGuard 中继",
+   "sublabel": "10.88.0.1 · 100 Mbps",
+   "row": 1,
+   "col": 1
+  },
+  {
+   "id": "cdn",
+   "type": "cloud",
+   "label": "OSS + CDN",
+   "sublabel": "静态 · 视频 · 下载",
+   "row": 4,
+   "col": 1
+  },
+  {
+   "id": "hn",
+   "type": "backend",
+   "label": "host-nginx :80",
+   "sublabel": "systemd · 磁盘缓存",
+   "row": 0,
+   "col": 2
+  },
+  {
+   "id": "compose",
+   "type": "backend",
+   "label": "Docker Compose 应用",
+   "sublabel": "mx-ocr · mx-static 等",
+   "row": 1,
+   "col": 2
+  },
+  {
+   "id": "proc",
+   "type": "backend",
+   "label": "宿主机进程",
+   "sublabel": "不进集群的项目",
+   "row": 2,
+   "col": 2
+  },
+  {
+   "id": "gpub",
+   "type": "security",
+   "label": "Gateway public",
+   "sublabel": "NodePort 30080 · NGF",
+   "row": 0,
+   "col": 3
+  },
+  {
+   "id": "gint",
+   "type": "security",
+   "label": "Gateway internal",
+   "sublabel": "NodePort 30081 · 只对内",
+   "row": 1,
+   "col": 3
+  },
+  {
+   "id": "ops",
+   "type": "backend",
+   "label": "运维面",
+   "sublabel": "Headlamp · Jenkins 等",
+   "row": 2,
+   "col": 3
+  },
+  {
+   "id": "svc",
+   "type": "backend",
+   "label": "services/ 服务",
+   "sublabel": "Hub · DataPort · mx-pay",
+   "row": 0,
+   "col": 4
+  },
+  {
+   "id": "proj",
+   "type": "backend",
+   "label": "projects/ 业务",
+   "sublabel": "协作业务 · 独立命名空间",
+   "row": 1,
+   "col": 4
+  },
+  {
+   "id": "plat",
+   "type": "backend",
+   "label": "平台服务",
+   "sublabel": "Elasticsearch · Redis · HanLP",
+   "row": 2,
+   "col": 4
+  },
+  {
+   "id": "pgc",
+   "type": "database",
+   "label": "pg-common",
+   "sublabel": "CloudNativePG · Hub / DataPort",
+   "row": 0,
+   "col": 5
+  },
+  {
+   "id": "pgpay",
+   "type": "database",
+   "label": "pg-pay",
+   "sublabel": "支付 · 独立实例",
+   "row": 1,
+   "col": 5
+  },
+  {
+   "id": "pgx",
+   "type": "database",
+   "label": "host-pg · pg-apps",
+   "sublabel": "采集原始数据 · 业务项目库",
+   "row": 2,
+   "col": 5
+  },
+  {
+   "id": "s1n",
+   "type": "backend",
+   "label": "s1 host-nginx :80",
+   "sublabel": "现役 · 不改",
+   "row": 3,
+   "col": 2
+  },
+  {
+   "id": "caddy",
+   "type": "security",
+   "label": "mx-internal-gateway",
+   "sublabel": "Caddy · 8008 / 18090",
+   "row": 3,
+   "col": 3
+  },
+  {
+   "id": "launcher",
+   "type": "backend",
+   "label": "Launcher",
+   "sublabel": "身份 · 网络 · 自有 PG",
+   "row": 3,
+   "col": 4
+  },
+  {
+   "id": "nas",
+   "type": "database",
+   "label": "NAS",
+   "sublabel": "NFS · 32T · 冷存储和备份",
+   "row": 4,
+   "col": 5
+  },
+  {
+   "id": "ext",
+   "type": "external",
+   "label": "数据供应商 · 大模型",
+   "sublabel": "HTTPS 出网",
+   "row": 4,
+   "col": 3
+  },
+  {
+   "id": "oversea",
+   "type": "cloud",
+   "label": "Oversea 站点",
+   "sublabel": "toC 海外 · 本地只读数据",
+   "row": 4,
+   "col": 2
+  },
+  {
+   "id": "oss",
+   "type": "cloud",
+   "label": "OSS 备份桶",
+   "sublabel": "每周 · 加密",
+   "row": 4,
+   "col": 4
+  }
+ ],
+ "connections": [
+  {
+   "from": "web",
+   "to": "dnginx",
+   "label": "HTTPS",
+   "variant": "emphasis"
+  },
+  {
+   "from": "partner",
+   "to": "dnginx",
+   "label": "HTTPS"
+  },
+  {
+   "from": "web",
+   "to": "cdn",
+   "label": "静态和视频"
+  },
+  {
+   "from": "dnginx",
+   "to": "wg"
+  },
+  {
+   "from": "wg",
+   "to": "hn",
+   "label": "WireGuard",
+   "variant": "emphasis"
+  },
+  {
+   "from": "office",
+   "to": "hn",
+   "label": "LAN"
+  },
+  {
+   "from": "h2i",
+   "to": "s1n",
+   "label": "产品网络"
+  },
+  {
+   "from": "s1n",
+   "to": "caddy"
+  },
+  {
+   "from": "caddy",
+   "to": "launcher"
+  },
+  {
+   "from": "hn",
+   "to": "gpub",
+   "label": "域名在集群里",
+   "variant": "emphasis"
+  },
+  {
+   "from": "hn",
+   "to": "compose",
+   "label": "本机端口"
+  },
+  {
+   "from": "hn",
+   "to": "gint",
+   "label": "只对内的域名"
+  },
+  {
+   "from": "gpub",
+   "to": "svc",
+   "label": "HTTPRoute",
+   "variant": "emphasis"
+  },
+  {
+   "from": "gint",
+   "to": "proj"
+  },
+  {
+   "from": "gint",
+   "to": "ops"
+  },
+  {
+   "from": "svc",
+   "to": "pgc",
+   "variant": "emphasis"
+  },
+  {
+   "from": "proj",
+   "to": "pgx"
+  },
+  {
+   "from": "svc",
+   "to": "ext",
+   "label": "采集"
+  },
+  {
+   "from": "svc",
+   "to": "launcher",
+   "label": "令牌校验"
+  },
+  {
+   "from": "pgx",
+   "to": "nas",
+   "label": "备份直接写"
+  },
+  {
+   "from": "nas",
+   "to": "oss",
+   "label": "每周"
+  },
+  {
+   "from": "plat",
+   "to": "oversea",
+   "label": "数据往外推"
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "region",
+   "label": "使用方",
+   "wraps": [
+    "web",
+    "partner",
+    "office",
+    "h2i"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "Domestic · 公网入口",
+   "wraps": [
+    "dnginx",
+    "wg"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "s2 宿主机 · systemd / Docker",
+   "wraps": [
+    "hn",
+    "compose",
+    "proc"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "s2 · Kubernetes（kubeadm v1.36 · flannel）",
+   "wraps": [
+    "gpub",
+    "gint",
+    "ops",
+    "svc",
+    "proj",
+    "plat",
+    "pgc",
+    "pgpay",
+    "pgx"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "s1 · L1 单节点集群（不调整，最后迁）",
+   "wraps": [
+    "s1n",
+    "caddy",
+    "launcher"
+   ]
+  }
+ ]
+}

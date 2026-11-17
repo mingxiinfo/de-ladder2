@@ -44,7 +44,9 @@ ${B}写入${O}（必须指名目标）
   k8s platform <gateway|postgres> --context <名字>   往指定集群装平台组件
   app diff|apply <项目> [环境] --context <名字>      对比 / 部署一个项目
   run <项目> <命令...>                               转调该项目自己的 scripts/manage.sh
-  diagrams [名字]                                    用 archify 生成 docs/atlas 的图册
+  diagrams [名字]                                    用 archify 生成 docs/atlas 和 design/architecture 的图
+  design stage|serve|build|up|stop|status|export     架构图站点：组装、预览、打镜像、在本机启动（docs/31）
+                            内网服务器出网：PROXY=http://127.0.0.1:7788 ./scripts/manage.sh design build
 
 ${D}还没实现：node prepare|join、backup run|verify、restore、loadtest（docs/17、docs/19）；控制台（docs/26）${O}
 EOF
@@ -140,6 +142,10 @@ cmd_check() {
     [[ -e "$(dirname "$f")/$link" ]] || bad "$f 链接到不存在的文件：$link"
   done < <(grep -oE '\]\([^)#:]+\.md\)' -r docs README.md CLAUDE.md 2>/dev/null | sed -E 's/\]\(([^)]+)\)/\1/')
   ok "Markdown 相对链接"
+
+  echo "${B}架构图站点${O}"
+  if python3 -m json.tool design/site/timeline.json >/dev/null 2>&1; then ok "design/site/timeline.json 是合法的 JSON"
+  else bad "design/site/timeline.json 不是合法的 JSON"; fi
 
   echo "${B}清单里的版本${O}"
   # shellcheck source=/dev/null
@@ -415,17 +421,17 @@ cmd_diagrams() {
   local ARCHIFY_BIN="${ARCHIFY_BIN:-$HOME/.local/share/archify/archify/bin/archify.mjs}"
   [[ -f "$ARCHIFY_BIN" ]] || die "找不到 archify：$ARCHIFY_BIN。安装方法见 docs/13。"
   local f name type out n=0
-  for f in docs/atlas/*.json; do
-    [[ -e "$f" ]] || break
-    [[ "$f" == *.delivery.json || "$f" == *.visual-check.json ]] && continue
-    name="$(basename "$f")"; type="${name%.json}"; type="${type##*.}"; out="docs/atlas/${name%."$type".json}.html"
+  for f in docs/atlas/*.json design/architecture/*.json; do
+    [[ -e "$f" ]] || continue
+    [[ "$f" == *.delivery.json || "$f" == *.visual-check.json || "$f" == *.delivery-pending.json ]] && continue
+    name="$(basename "$f")"; type="${name%.json}"; type="${type##*.}"; out="$(dirname "$f")/${name%."$type".json}.html"
     [[ -z "${1:-}" || "$name" == "$1"* ]] || continue
-    echo "▶ $name → $out"
+    echo "▶ $f → $out"
     node "$ARCHIFY_BIN" deliver "$type" "$f" "$out" --quality showcase --repo-root "$ROOT" \
       || die "生成失败：$name"
     n=$((n+1))
   done
-  (( n )) || echo "docs/atlas 里没有匹配的 <名>.<类型>.json 源文件。"
+  (( n )) || echo "docs/atlas 和 design/architecture 里没有匹配的 <名>.<类型>.json 源文件。"
 }
 
 # ---------- probe ----------
@@ -550,6 +556,129 @@ probe_diff() { # probe_diff <名字> <外层合计> <里层合计>
   fi
 }
 
+# ---------- design ----------
+# 架构图站点（docs/31）：design/ 下的首页、演变时间线和 Archify 图，打包成一个 Nginx 镜像。
+
+DESIGN_BUILD="design/.build"
+
+design_stage() { # 把站点需要的文件组装到 design/.build/html
+  local out="$DESIGN_BUILD/html" f href missing=0
+  rm -rf "$DESIGN_BUILD"
+  mkdir -p "$out/diagrams" "$out/atlas" "$out/ui"
+  cp design/site/index.html design/site/timeline.json "$out/"
+  cp console/ui-design/dist/tokens.css "$out/ui/"
+  for f in design/architecture/*.html; do [[ -e "$f" ]] && cp "$f" "$out/diagrams/"; done
+  for f in docs/atlas/*.html; do [[ -e "$f" && "$(basename "$f")" != index.html ]] && cp "$f" "$out/atlas/"; done
+  cp design/deploy/nginx.conf "$DESIGN_BUILD/"
+  local rev="未提交"
+  rev="$(git rev-parse --short HEAD 2>/dev/null || echo 未提交)"
+  [[ -n "$(git status --porcelain -- design docs/atlas 2>/dev/null)" ]] && rev="$rev（有未提交的改动）"
+  printf '{"built_at":"%s","revision":"%s"}\n' "$(date '+%Y-%m-%d %H:%M')" "$rev" > "$out/build.json"
+  # timeline.json 里引用的每一张图都要在站点里
+  while read -r href; do
+    [[ -f "$out/$href" ]] || { echo "  ${R}✗${O} timeline.json 引用了不存在的图：$href" >&2; missing=1; }
+  done < <(grep -oE '"href": *"[^"]+"' design/site/timeline.json | sed -E 's/.*"([^"]+)"$/\1/')
+  (( missing == 0 )) || die "站点组装失败。先 ./scripts/manage.sh diagrams 生成图，或改 timeline.json。"
+  echo "  ${G}✓${O} 站点已组装到 $out（$(find "$out" -name '*.html' | wc -l | tr -d ' ') 个页面）"
+}
+
+design_need_docker() {
+  command -v docker >/dev/null || die "UNKNOWN：这台机器没有 docker"
+  docker info >/dev/null 2>&1 || die "UNKNOWN：连不上 Docker（没启动，或当前用户没有权限）"
+}
+
+# PROXY=http://127.0.0.1:7788：内网服务器出网走 Internal 的出网代理（qp-tunnel-cli 的 7788 实例）。
+# 两件事分开：
+#   拉基础镜像  是 Docker 守护进程做的，只认守护进程自己的代理配置，命令行传不进去。
+#              这里不改守护进程（改了要重启 docker.service，同机的 Compose 应用会跟着重启），只检查并说明。
+#   RUN 步骤    用 --build-arg 传进去；代理在本机回环地址时构建要用宿主机网络才连得上。
+DESIGN_PROXY_ARGS=()
+design_pull_help() {
+  printf '\n  任选一个办法：\n'
+  printf '  1. 让守护进程走代理：sudo qp-tunnel-cli docker-build-proxy on（会重启 docker.service，同机的 Compose 应用会跟着重启），拉完可以 off\n'
+  printf '  2. 在能联网的机器上 docker pull %s && docker save %s | gzip > base.tar.gz，拷过来 gunzip -c base.tar.gz | docker load\n' "$1" "$1"
+  printf '  3. 在开发机上 design build、design export，把整个站点镜像拷过来'
+}
+design_proxy_prepare() { # design_proxy_prepare <基础镜像>
+  local img="$1" dp
+  DESIGN_PROXY_ARGS=()
+  if [[ -n "${PROXY:-}" ]]; then
+    local np="localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8"
+    DESIGN_PROXY_ARGS+=(--build-arg "HTTP_PROXY=$PROXY" --build-arg "HTTPS_PROXY=$PROXY" --build-arg "NO_PROXY=$np"
+                        --build-arg "http_proxy=$PROXY" --build-arg "https_proxy=$PROXY" --build-arg "no_proxy=$np")
+    [[ "$PROXY" == *://127.0.0.1:* || "$PROXY" == *://localhost:* ]] && DESIGN_PROXY_ARGS+=(--network host)
+    echo "  构建步骤走代理 $PROXY"
+  fi
+  if docker image inspect "$img" >/dev/null 2>&1; then
+    echo "  基础镜像 $img 已在本机，不用拉"
+    return 0
+  fi
+  dp="$(docker info --format '{{.HTTPSProxy}}' 2>/dev/null || true)"
+  if [[ -n "${PROXY:-}" && -z "$dp" ]]; then
+    die "本机没有基础镜像 $img，而 Docker 守护进程没有配置代理：拉镜像不会走 $PROXY。$(design_pull_help "$img")"
+  fi
+  if [[ -n "${PROXY:-}" && -n "$dp" && "$dp" != *"${PROXY#*://}"* ]]; then
+    warn "Docker 守护进程拉镜像用的代理是 $dp，不是 $PROXY"
+  fi
+  echo "  拉基础镜像 $img${dp:+（守护进程的代理：$dp）}"
+  docker pull "$img" || die "拉不到基础镜像 $img。$(design_pull_help "$img")"
+}
+
+design_compose() {
+  # shellcheck source=/dev/null
+  source "$K8S/versions.env"
+  DESIGN_IMAGE="ladder2-design:latest" DESIGN_PORT="${DESIGN_PORT:-18310}" \
+    docker compose -p ladder2-design -f design/deploy/compose.yml "$@"
+}
+
+cmd_design() {
+  local sub="${1:-}"; shift || true
+  # shellcheck source=/dev/null
+  source "$K8S/versions.env"
+  local port="${DESIGN_PORT:-18310}"
+  case "$sub" in
+    stage) design_stage ;;
+    serve)
+      design_stage
+      local p="${1:-8310}"
+      echo "  预览：http://127.0.0.1:$p/   （Ctrl-C 结束）"
+      python3 -m http.server "$p" --bind 127.0.0.1 --directory "$DESIGN_BUILD/html" ;;
+    build)
+      design_need_docker
+      design_stage
+      local tag; tag="$(date +%Y%m%d-%H%M%S)"
+      design_proxy_prepare "$DESIGN_NGINX_IMAGE"
+      docker build ${DESIGN_PROXY_ARGS[@]+"${DESIGN_PROXY_ARGS[@]}"} --build-arg "NGINX_IMAGE=$DESIGN_NGINX_IMAGE" -f design/deploy/Dockerfile \
+        -t "ladder2-design:$tag" -t ladder2-design:latest "$DESIGN_BUILD"
+      echo "  ${G}✓${O} 镜像 ladder2-design:$tag（同时标为 latest）" ;;
+    up)
+      design_need_docker
+      docker image inspect ladder2-design:latest >/dev/null 2>&1 || die "没有镜像 ladder2-design:latest。先 design build，或 docker load 导入。"
+      design_compose up -d --pull never
+      echo "  ${G}✓${O} 已启动，本机 http://127.0.0.1:$port/ 。对内网开放见 design/deploy/host-nginx.conf.example" ;;
+    stop)
+      design_need_docker
+      design_compose stop ;;
+    status)
+      design_need_docker
+      local st; st="$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' ladder2-design 2>/dev/null)" \
+        || { echo "  未部署（这台机器上没有 ladder2-design 容器）"; return 0; }
+      echo "  容器：$st；镜像：$(docker inspect -f '{{.Config.Image}}' ladder2-design)"
+      if curl -fsS --max-time 3 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then ok "http://127.0.0.1:$port/healthz"
+      else bad "http://127.0.0.1:$port/healthz 不通"; fi
+      if (( FAILED )); then exit 1; fi ;;
+    export)
+      design_need_docker
+      docker image inspect ladder2-design:latest >/dev/null 2>&1 || die "没有镜像 ladder2-design:latest。先 design build。"
+      local f="$DESIGN_BUILD/ladder2-design-$(date +%Y%m%d-%H%M%S).tar.gz"
+      mkdir -p "$DESIGN_BUILD"
+      docker save ladder2-design:latest | gzip > "$f"
+      echo "  ${G}✓${O} $f（$(du -h "$f" | cut -f1)）"
+      echo "  在服务器上：gunzip -c <文件> | docker load，然后 ./scripts/manage.sh design up" ;;
+    *) die "用法：design stage | serve [端口] | build | up | stop | status | export（docs/31）" ;;
+  esac
+}
+
 main() {
   local cmd="${1:-help}"; shift || true
   case "$cmd" in
@@ -568,6 +697,7 @@ main() {
     disk) cmd_disk "$@" ;;
     diagrams) cmd_diagrams "$@" ;;
     probe) cmd_probe "$@" ;;
+    design) cmd_design "$@" ;;
     *) usage; die "未知命令：$cmd" ;;
   esac
 }
