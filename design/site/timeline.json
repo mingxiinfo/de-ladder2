@@ -117,6 +117,10 @@
   ],
   "references": [
     {
+      "title": "toC 站点：arguseek 和 Delta",
+      "href": "diagrams/06-toc-oversea.html"
+    },
+    {
       "title": "备份与一键还原",
       "href": "atlas/03-backup.html"
     },
@@ -155,6 +159,12 @@
       "date": "2026-11-17",
       "docs": "30",
       "decisions": "运维面 mx-ops（含 Jenkins）；内网约 300 Mbps；当前设计画成五张架构图"
+    },
+    {
+      "round": "第六轮",
+      "date": "2026-11-17",
+      "docs": "33–34",
+      "decisions": "arguseek 登记进 projects/；toC 站点放一台云服务器：给 arguseek 新开一个 Delta 实例，查 Hub 走公开接口；区域按实测选，东京、新加坡优先；NAS 读写用本机缓存加内网发起的隧道"
     }
   ]
 }

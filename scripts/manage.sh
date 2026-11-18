@@ -92,12 +92,15 @@ cmd_list() {
 cmd_hosts() {
   awk '
     /^hosts:/{h=1;next} /^[a-z_]+:/{h=0}
-    h && /^  [a-z0-9_-]+:[ ]*$/{ if(n) printf "%-9s %-8s %-9s %-16s %s\n", n, role, site, ip, desc; n=$1; sub(":","",n); site=role=desc=""; ip="—"; next }
+    function out(){ if(n) printf "%-12s %-8s %-9s %-16s %s\n", n, role, site, (lan!="" ? lan : (pub!="" ? pub : "—")), desc }
+    h && /^  [a-z0-9_-]+:[ ]*$/{ out(); n=$1; sub(":","",n); site=role=desc=lan=pub=""; next }
     h && $1=="site:"{ site=$2 }
     h && $1=="role:"{ role=$2 }
-    h && $1=="lan_ip:"{ ip=$2 }
+    h && $1=="lan_ip:"{ lan=$2 }
+    h && $1=="public_ip:"{ pub=$2 }
     h && $1=="desc:"{ $1=""; sub(/^ +/,""); desc=$0 }
-    END{ if(n) printf "%-9s %-8s %-9s %-16s %s\n", n, role, site, ip, desc }' "$INV_HOSTS"
+    END{ out() }' "$INV_HOSTS"
+  echo "${D}地址：内网机器写 LAN 地址，公网机器写公网地址，都没有登记的是 —。${O}"
   echo "${D}详细字段和来源：$INV_HOSTS${O}"
 }
 
@@ -329,7 +332,8 @@ cmd_node() {
   esac
   local role; role="$(host_field "$host" role)"
   [[ -n "$role" ]] || die "inventory/hosts.yaml 里没有主机：${host:-（空）}"
-  echo "${B}$host${O}  角色 $role  地址 $(host_field "$host" lan_ip)  系统 $(host_field "$host" os)"
+  local addr; addr="$(host_field "$host" lan_ip)"; [[ -n "$addr" ]] || addr="$(host_field "$host" public_ip)"
+  echo "${B}$host${O}  角色 $role  地址 ${addr:-未登记}  系统 $(host_field "$host" os)"
   local step=0; s() { step=$((step+1)); echo "  $step. $*"; }
   case "$role" in
     l1) echo "  这是现役的旧集群。本工程不对它做任何准备或加入操作（docs/16）。"; return 0 ;;
@@ -663,7 +667,14 @@ design_reach_hint() { # design_reach_hint <监听地址> <端口>：从别的机
   # 防火墙：只查询，不放行。放行是改 iptables，由人决定（CLAUDE.md）
   if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     if firewall-cmd --query-port="$port/tcp" >/dev/null 2>&1; then ok "firewalld 已放行 $port/tcp"
-    else warn "firewalld 在运行，没有放行 $port/tcp，其他机器可能打不开。要放行由你执行：firewall-cmd --add-port=$port/tcp（加 --permanent 再 --reload 才在重启后保留）"; fi
+    else
+      warn "firewalld 在运行，没有放行 $port/tcp，其他机器可能打不开。要放行由你执行这两条（第一条马上生效，第二条重启后保留）："
+      echo "      firewall-cmd --add-port=$port/tcp"
+      echo "      firewall-cmd --permanent --add-port=$port/tcp"
+      # 不要 reload：s1 上 firewalld reload 会清掉 hostPort 的转发规则，要等 Pod 重建才恢复
+      # （L1 mx-launcher/deploy/k8s/internal-shadow/15-dns-control-target.yaml 的注释）
+      echo "  ${R}不要执行 firewall-cmd --reload${O}：在跑着 Kubernetes 的机器（比如 s1）上，它会清掉 hostPort 的转发规则，相关服务要等 Pod 重建才恢复。"
+    fi
   elif command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
     if ufw status 2>/dev/null | grep -qE "^$port(/tcp)? +ALLOW"; then ok "ufw 已放行 $port/tcp"
     else warn "ufw 在运行，没有放行 $port/tcp，其他机器可能打不开。要放行由你执行：ufw allow $port/tcp"; fi

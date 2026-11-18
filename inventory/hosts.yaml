@@ -78,11 +78,24 @@ hosts:
     spec: 2 vCPU / 4 GiB / 峰值 100 Mbps / 流量 0.8 元每 GB
     source: mx-launcher/docs/53、de-mingxi/compass/deploy/README.md
 
-  cloud:
-    name: 未租用
-    site: 待定                       # 在国内归 domestic，在海外归 oversea（docs/21）
-    role: site
-    desc: 独立站点，可兼做公网入口。不加入集群（docs/17）。区域未定
+  # 原来这里是占位 cloud（未租用）。2026-11-17 第六轮换成已有的这台（docs/33）。
+  oversea-toc:
+    name: 待确认
+    site: oversea
+    role: site                       # 兼 edge：自己终结 arguseek 域名的 TLS。不加入集群（docs/17）
+    desc: toC 海外站点。arguseek 在上面；规划再放一个 Delta 海外实例（docs/33）
+    public_ip: 54.208.24.231         # 出自 arguseek ops/lib.sh 的默认 SSH 目标，没登录核对。现在这台算过渡
+    provider: 待确认（地址段看起来像 AWS 美东）
+    region: 待定。用户 2026-11-17：各地都有用户，只要访问快；东京、新加坡优先，实测后定（docs/34）
+    nas: 读写走 rclone 本机缓存加内网发起的隧道，内网端放 s2，s1 不动（用户 2026-11-18）；只写 NAS 上的 sites/oversea-toc/（docs/34）
+    spec: 待确认。估算要 16 核 / 64 GiB / 1 TiB SSD 起才放得下 Delta（docs/33）
+    listen:                          # 出自 arguseek ops/README.md，没在机器上看过
+      80: Caddy
+      443: Caddy（dev.arguseek.com、inhouse.arguseek.com）
+      127.0.0.1:18080: arguseek-dev
+      127.0.0.1:18081: arguseek-inhouse
+    secrets: /etc/arguseek/<环境>.env（root，0600）。不进 Git
+    source: arguseek ops/README.md、ops/lib.sh、ops/Caddyfile
 
 # s1 上现有的 bind 挂载（来自 fstab 截图）。数据实际位置由这些行决定，清单里看不出来。
 s1_bind_mounts:

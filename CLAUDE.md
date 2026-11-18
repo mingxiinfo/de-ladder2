@@ -88,3 +88,4 @@ Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节
 - 经 Domestic 的代理和用户流量共用 100 Mbps，订阅要限速；视频和大文件对外走 OSS 加 CDN（`docs/27`）。
 - 控制面坏了不等于服务停了：已经在跑的 Pod 和网关继续工作。也不会自动切换到另一台（`docs/26`）。
 - `infra/` 里网关和 CloudNativePG 的版本号抄自 cc-studio，没有重新核对，也没在集群上跑过。
+- arguseek 跑在海外云服务器 `oversea-toc` 上，不在 s1；Delta（po-infra）的正式和 dev 在 s1。海外要放 Delta 就整个实例放，不要 worker 在海外、库和 Redis 在内网。海外站点不跨境用 NFS 挂 NAS，读写走 rclone 本机缓存加内网发起的隧道，隧道的内网端放 s2、s1 不动，站点只写自己的目录；站点区域没定，按实测选（`docs/33`、`docs/34`）。

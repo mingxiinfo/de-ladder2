@@ -12,3 +12,22 @@ routes:
     host_nginx: http://192.168.1.4
     gateway: http://192.168.1.4:30080
     service: 待确认
+
+  # 海外站点（docs/33）。站点不经 host-nginx 和 Gateway，只登记公网那一层；
+  # 应用只听站点本机的回环，从内网探测不到，所以 service 不登记。
+  arguseek-dev:
+    what: arguseek dev 环境，海外站点 oversea-toc。/healthz 是前端容器的健康检查，不访问数据库
+    host: dev.arguseek.com
+    path: /healthz
+    edge: https://dev.arguseek.com
+    host_nginx:
+    gateway:
+    service:
+  arguseek-inhouse:
+    what: arguseek inhouse 环境，海外站点 oversea-toc
+    host: inhouse.arguseek.com
+    path: /healthz
+    edge: https://inhouse.arguseek.com
+    host_nginx:
+    gateway:
+    service:

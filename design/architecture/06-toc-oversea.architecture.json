@@ -1,0 +1,323 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "toC 站点 · arguseek 和 Delta 在一台云服务器上",
+  "subtitle": "设计（docs/33、34），区域待定，没有登录过服务器",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "output": "design/architecture/06-toc-oversea.html"
+ },
+ "layout": {
+  "mode": "grid",
+  "origin": [
+   40,
+   90
+  ],
+  "cols": 6,
+  "gapX": 56,
+  "gapY": 64,
+  "cellW": 168,
+  "cellH": 80
+ },
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "区域：访问快就行",
+   "items": [
+    "东京、新加坡优先：离国内近，大模型能直连",
+    "候选各开一台测一天，按国内晚高峰定"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "跨境的只有两样",
+   "items": [
+    "查 Hub：走公开接口，复用连接、设超时、加缓存",
+    "NAS 读写：本机缓存加内网发起的隧道，不用 NFS"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "坏了会怎样",
+   "items": [
+    "隧道断了：缓存里的照读，新写的排队",
+    "内网断了：能登录、看历史，新查询失败"
+   ]
+  }
+ ],
+ "components": [
+  {
+   "id": "user",
+   "type": "external",
+   "label": "各地 toC 用户",
+   "sublabel": "国内 · 亚洲 · 欧美",
+   "row": 0,
+   "col": 0
+  },
+  {
+   "id": "bots",
+   "type": "external",
+   "label": "企业机器人回调",
+   "sublabel": "飞书 · 钉钉 · 企微",
+   "row": 1,
+   "col": 0
+  },
+  {
+   "id": "llm",
+   "type": "external",
+   "label": "大模型 API",
+   "sublabel": "站点直连",
+   "row": 2,
+   "col": 0
+  },
+  {
+   "id": "caddy",
+   "type": "security",
+   "label": "站点 Caddy",
+   "sublabel": ":443 · 每个域名一个片段",
+   "row": 0,
+   "col": 1
+  },
+  {
+   "id": "adev",
+   "type": "backend",
+   "label": "arguseek-dev",
+   "sublabel": "127.0.0.1:18080",
+   "row": 0,
+   "col": 2
+  },
+  {
+   "id": "ainh",
+   "type": "backend",
+   "label": "arguseek-inhouse",
+   "sublabel": "18081 · 以后加正式",
+   "row": 1,
+   "col": 2
+  },
+  {
+   "id": "delta",
+   "type": "backend",
+   "label": "Delta 海外实例",
+   "sublabel": "给 arguseek 新开",
+   "row": 2,
+   "col": 2
+  },
+  {
+   "id": "pga",
+   "type": "database",
+   "label": "arguseek PG",
+   "sublabel": "每个环境一个",
+   "row": 0,
+   "col": 3
+  },
+  {
+   "id": "pgd",
+   "type": "database",
+   "label": "Delta PG · Redis",
+   "sublabel": "站点本机盘",
+   "row": 1,
+   "col": 3
+  },
+  {
+   "id": "cache",
+   "type": "database",
+   "label": "rclone 本机缓存",
+   "sublabel": "读命中走本地 · 写后台传",
+   "row": 2,
+   "col": 3
+  },
+  {
+   "id": "cdn",
+   "type": "cloud",
+   "label": "CDN",
+   "sublabel": "前端静态文件",
+   "row": 3,
+   "col": 1
+  },
+  {
+   "id": "obj",
+   "type": "cloud",
+   "label": "同区域对象存储",
+   "sublabel": "每日备份 · 加密",
+   "row": 3,
+   "col": 3
+  },
+  {
+   "id": "tun",
+   "type": "security",
+   "label": "内网发起的隧道",
+   "sublabel": "只通文件服务 · 限速",
+   "row": 2,
+   "col": 4
+  },
+  {
+   "id": "dn",
+   "type": "cloud",
+   "label": "Domestic Nginx",
+   "sublabel": "hub.minsight-ai.com",
+   "row": 1,
+   "col": 4
+  },
+  {
+   "id": "hub",
+   "type": "backend",
+   "label": "Hub",
+   "sublabel": "单独的 Key 和配额",
+   "row": 1,
+   "col": 5
+  },
+  {
+   "id": "fs",
+   "type": "backend",
+   "label": "文件服务 · s2",
+   "sublabel": "rclone serve · 要鉴权",
+   "row": 2,
+   "col": 5
+  },
+  {
+   "id": "nas",
+   "type": "database",
+   "label": "NAS",
+   "sublabel": "站点只写 sites/ 目录",
+   "row": 3,
+   "col": 5
+  }
+ ],
+ "connections": [
+  {
+   "from": "user",
+   "to": "caddy",
+   "label": "接口 · 事件流",
+   "variant": "emphasis"
+  },
+  {
+   "from": "user",
+   "to": "cdn",
+   "label": "静态文件"
+  },
+  {
+   "from": "cdn",
+   "to": "caddy",
+   "label": "回源"
+  },
+  {
+   "from": "bots",
+   "to": "caddy",
+   "label": "事件回调"
+  },
+  {
+   "from": "caddy",
+   "to": "adev",
+   "variant": "emphasis"
+  },
+  {
+   "from": "caddy",
+   "to": "ainh"
+  },
+  {
+   "from": "adev",
+   "to": "delta",
+   "label": "同机 HTTPS",
+   "variant": "emphasis"
+  },
+  {
+   "from": "ainh",
+   "to": "delta"
+  },
+  {
+   "from": "adev",
+   "to": "pga"
+  },
+  {
+   "from": "delta",
+   "to": "pgd"
+  },
+  {
+   "from": "delta",
+   "to": "cache",
+   "label": "媒体目录"
+  },
+  {
+   "from": "delta",
+   "to": "llm",
+   "label": "直连"
+  },
+  {
+   "from": "delta",
+   "to": "dn",
+   "label": "查 Hub · 跨境",
+   "variant": "emphasis"
+  },
+  {
+   "from": "dn",
+   "to": "hub",
+   "label": "WireGuard"
+  },
+  {
+   "from": "cache",
+   "to": "tun",
+   "label": "读未命中 · 写回",
+   "variant": "emphasis"
+  },
+  {
+   "from": "tun",
+   "to": "fs"
+  },
+  {
+   "from": "fs",
+   "to": "nas",
+   "label": "NFS · LAN"
+  },
+  {
+   "from": "pga",
+   "to": "obj",
+   "label": "每日 pg_dump"
+  },
+  {
+   "from": "obj",
+   "to": "nas",
+   "label": "每周 · 内网拉回"
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "region",
+   "label": "外部",
+   "wraps": [
+    "user",
+    "bots",
+    "llm"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "站点云服务器 · 区域待定 · Docker Compose",
+   "wraps": [
+    "caddy",
+    "adev",
+    "ainh",
+    "delta",
+    "pga",
+    "pgd",
+    "cache"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "Domestic",
+   "wraps": [
+    "dn"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "Internal",
+   "wraps": [
+    "hub",
+    "fs",
+    "nas"
+   ]
+  }
+ ]
+}

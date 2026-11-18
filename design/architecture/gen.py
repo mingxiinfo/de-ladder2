@@ -39,7 +39,7 @@ comps=[
  C("launcher","backend","Launcher","身份 · 网络 · 自有 PG",3,4),
  C("nas","database","NAS","NFS · 32T · 冷存储和备份",4,5),
  C("ext","external","数据供应商 · 大模型","HTTPS 出网",4,3),
- C("oversea","cloud","Oversea 站点","toC 海外 · 本地只读数据",4,2),
+ C("oversea","cloud","Oversea toC 站点","arguseek · Delta · 见 06",4,2),
  C("oss","cloud","OSS 备份桶","每周 · 加密",4,4),
 ]
 conns=[
@@ -210,3 +210,47 @@ cards=[
  {"dot":"emerald","title":"toC 怎么扛量","items":["静态和视频走 OSS + CDN","站点读本地数据，内网只做源头"]},
 ]
 doc("05-stage-c","阶段 C · 三台控制面，向外加入口和站点","设计（docs/16、17、30），没有实测",6,comps,conns,bounds,cards)
+
+# ---------- 06 toC 海外站点 ----------
+comps=[
+ C("user","external","各地 toC 用户","国内 · 亚洲 · 欧美",0,0),
+ C("bots","external","企业机器人回调","飞书 · 钉钉 · 企微",1,0),
+ C("llm","external","大模型 API","站点直连",2,0),
+ C("caddy","security","站点 Caddy",":443 · 每个域名一个片段",0,1),
+ C("adev","backend","arguseek-dev","127.0.0.1:18080",0,2),
+ C("ainh","backend","arguseek-inhouse","18081 · 以后加正式",1,2),
+ C("delta","backend","Delta 海外实例","给 arguseek 新开",2,2),
+ C("pga","database","arguseek PG","每个环境一个",0,3),
+ C("pgd","database","Delta PG · Redis","站点本机盘",1,3),
+ C("cache","database","rclone 本机缓存","读命中走本地 · 写后台传",2,3),
+ C("cdn","cloud","CDN","前端静态文件",3,1),
+ C("obj","cloud","同区域对象存储","每日备份 · 加密",3,3),
+ C("tun","security","内网发起的隧道","只通文件服务 · 限速",2,4),
+ C("dn","cloud","Domestic Nginx","hub.minsight-ai.com",1,4),
+ C("hub","backend","Hub","单独的 Key 和配额",1,5),
+ C("fs","backend","文件服务 · s2","rclone serve · 要鉴权",2,5),
+ C("nas","database","NAS","站点只写 sites/ 目录",3,5),
+]
+conns=[
+ L("user","caddy","接口 · 事件流",True), L("user","cdn","静态文件"), L("cdn","caddy","回源"),
+ L("bots","caddy","事件回调"),
+ L("caddy","adev",None,True), L("caddy","ainh"),
+ L("adev","delta","同机 HTTPS",True), L("ainh","delta"),
+ L("adev","pga"), L("delta","pgd"), L("delta","cache","媒体目录"),
+ L("delta","llm","直连"),
+ L("delta","dn","查 Hub · 跨境",True), L("dn","hub","WireGuard"),
+ L("cache","tun","读未命中 · 写回",True), L("tun","fs"), L("fs","nas","NFS · LAN"),
+ L("pga","obj","每日 pg_dump"), L("obj","nas","每周 · 内网拉回"),
+]
+bounds=[
+ {"kind":"region","label":"外部","wraps":["user","bots","llm"]},
+ {"kind":"region","label":"站点云服务器 · 区域待定 · Docker Compose","wraps":["caddy","adev","ainh","delta","pga","pgd","cache"]},
+ {"kind":"region","label":"Domestic","wraps":["dn"]},
+ {"kind":"region","label":"Internal","wraps":["hub","fs","nas"]},
+]
+cards=[
+ {"dot":"cyan","title":"区域：访问快就行","items":["东京、新加坡优先：离国内近，大模型能直连","候选各开一台测一天，按国内晚高峰定"]},
+ {"dot":"amber","title":"跨境的只有两样","items":["查 Hub：走公开接口，复用连接、设超时、加缓存","NAS 读写：本机缓存加内网发起的隧道，不用 NFS"]},
+ {"dot":"emerald","title":"坏了会怎样","items":["隧道断了：缓存里的照读，新写的排队","内网断了：能登录、看历史，新查询失败"]},
+]
+doc("06-toc-oversea","toC 站点 · arguseek 和 Delta 在一台云服务器上","设计（docs/33、34），区域待定，没有登录过服务器",6,comps,conns,bounds,cards)

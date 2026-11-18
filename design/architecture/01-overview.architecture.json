@@ -242,8 +242,8 @@
   {
    "id": "oversea",
    "type": "cloud",
-   "label": "Oversea 站点",
-   "sublabel": "toC 海外 · 本地只读数据",
+   "label": "Oversea toC 站点",
+   "sublabel": "arguseek · Delta · 见 06",
    "row": 4,
    "col": 2
   },

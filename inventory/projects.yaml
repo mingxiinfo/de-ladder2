@@ -3,7 +3,7 @@
 #   platform  本工程自己负责（集群、网关、数据面、基础服务）
 #   mx        level-1 仓库里的 MX 项目，源码留在原仓库
 #   external  别人的项目或暂时不上 k8s 的程序，只登记、只读探测
-# l2_state: l1-only（只在 s1 运行）| planned | migrating | l2（已在新集群）| stays（不迁）
+# l2_state: l1-only（只在 s1 运行）| planned | migrating | l2（已在新集群）| stays（不迁）| site（在独立站点上运行，不进集群，docs/17）
 roots:
   l1: /Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr
   dock: /Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock
@@ -142,9 +142,26 @@ projects:
   po-infra:
     class: external
     path: mingxi/po-infra
-    what: Django + Celery（web、多个 worker、beat、websearch）+ postgres + redis
-    runtime: Docker Compose
+    what: Delta 平台。Django + Celery（web、多个 worker、beat、websearch）+ postgres + redis
+    runtime: Docker Compose。s1 上正式 59201、dev 59202（po-infra docs/release_directories.md）
+    depends: [Hub（同机直连 host.docker.internal:18150）, NAS（正式环境的采集媒体）, 大模型（经 7788 / 7890 代理）]
     l2_state: stays
+    note: 在海外站点 oversea-toc 上给 arguseek 新开一个实例（用户 2026-11-17 确认），整个实例放，不拆；s1 上的两个不动（docs/33）。实例名和端口由 po-infra 定
+
+  arguseek:
+    class: external
+    path: mingxi/arguseek
+    what: toC 的 AI 风险研究工作台。React SPA + Go 后端 + PostgreSQL 16
+    runtime: Docker Compose，海外站点 oversea-toc；dev 127.0.0.1:18080、inhouse 127.0.0.1:18081，Caddy 终结 TLS
+    domains: [dev.arguseek.com, inhouse.arguseek.com]
+    depends: [Delta（现在是 https://dev.delta.minsight-ai.com，跨境回内网）]
+    data: 每个环境一个 PostgreSQL（Compose 卷）；研究记录和报告文件都在库里，不读 NAS
+    secrets: 服务器 /etc/arguseek/<环境>.env。身份 HMAC 密钥要和库一起保管
+    manage: ops/deploy.sh、ops/rollback.sh、ops/health.sh、ops/invites.sh（它自己的发布脚本，不经本工程）
+    docs: README.md、ops/README.md、docs/developer-onboarding.md
+    l2_state: site
+    users: 各地都有，toC（用户 2026-11-17）。前端静态文件走 CDN，接口和事件流走源站（docs/34）
+    l2_target: 站点区域实测后迁到选定的机器；Delta 海外实例上线后改连本机；L2 补每日备份、探测（docs/33、docs/34、projects/arguseek/）
 
   luopan:
     class: external
