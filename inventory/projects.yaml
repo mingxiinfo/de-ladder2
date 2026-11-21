@@ -1,4 +1,4 @@
-# 项目登记。本工程不拷贝这些项目的源码，只记录它们在哪、怎么部署、谁负责、迁移到哪一步。
+# 项目登记：它们在哪、怎么部署、谁负责、迁移到哪一步。迁到 L2 的项目从 L1 拷进本工程的 architecture/ 或 projects/，l2_source 指向那里（docs/46）。
 # class:
 #   platform  本工程自己负责（集群、网关、数据面、基础服务）
 #   mx        level-1 仓库里的 MX 项目，源码留在原仓库
@@ -6,6 +6,8 @@
 # l2_state: l1-only（只在 s1 运行）| planned | migrating | l2（已在新集群）| stays（不迁）| site（在独立站点上运行，不进集群，docs/17）
 roots:
   l1: /Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr
+  # L1 pro 分支 0a92448 的原样副本，只作对照，不再改。L2 的改造在 architecture/ 和 projects/ 里（docs/46）
+  ladder1: ladder1
   dock: /Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock
   mingxi: /Users/qpjoy/workspace/mingxi
   deploy_repo: /Users/qpjoy/workspace/mingxi/de-mingxi
@@ -22,8 +24,10 @@ projects:
       mx-h2i: 以 Internal 为操作面中心，所有配置都在 Internal
       luopan: 使用 standalone launcher 的 quasar 项目，用来测 launcher 的网络、权限、用户
     hard_rule: 任何改动不得影响 MX-H2I 现有用户登录和现有联网
-    l2_state: l1-only
-    migrate_order: 最后
+    l2_state: migrating
+    migrate_order: 第一个在 s2 上复刻；用户流量的切换排最后（docs/36）
+    # 2026-11-22 从 L1 pro 1d9555e8 拷来，L2 的改动在这里做；清单和镜像写好了，没在集群上部署过（docs/46）
+    l2_source: architecture/mx-launcher
 
   mx-insight-hub:
     class: mx
@@ -112,9 +116,10 @@ projects:
   tunnel-cli:
     class: platform
     path: l1/electron-plugin/packages/tunnel-cli
-    what: qp-tunnel-cli，OpenVPN mesh（100.127.0.0/24，instance mx）
-    docs: openvpn.setup.md
+    what: qp-tunnel-cli，OpenVPN mesh（100.127.0.0/24，instance mx）；edge 子命令从 Internal 经 SSH 推送部署到边缘机器（docs/37），按技术栈分 resources/edge/stacks：wg-nginx、open-nginx、hy2-mihomo；edge status 看本机和每台机器（docs/38）；每台 Internal 都能当推送机，edge relations 看谁管什么，配置目录在推送机的 /var/lib/qp-tunnel/edge（docs/39）；edge link 建边缘机器回 Internal 的 WireGuard 隧道，照 L1 的 mx-domestic / mx-internal-svc，wg-nginx 的回源用它（docs/40）；edge setup 一步步问、给默认值，缺的工具先问再装，隧道网段 100.127.(200+n).0/24、网卡 qpjoy-*（docs/41）；只给了密码的机器用 edge key install 输一次密码装上推送机的 edge 密钥，密码不保存（docs/42）；边缘隧道共用 100.127.200.0/24（Domestic .N、Internal .87+N），link check 说明握不上手的原因，link init --replace 重建（docs/43）；默认 --plan launcher 用 Launcher 的 10.88 编号（Domestic 10.88.0.N、Internal 10.88.88.(87+N)，只路由 /32），--plan isolated 用 100.127.200.0/24（docs/44）
+    docs: openvpn.setup.md、README.md 的 Edge Hosts 一节、resources/edge/README.md
     l2_state: stays
+    note: edge 子命令 2026-11-21 写在 L1 仓库里（用户要求），未提交、未发 npm；ladder1/ 的副本没有它。hy2-mihomo 栈原样带上 docker/hysteria2-mihomo-stack 和 scripts/export-hysteria2-mihomo*.sh（打包时复制，不改原文件）；镜像版本用栈里的 docker-compose.override.yml 固定，L1 的 compose 文件没改（docs/39）。用户 2026-11-22 说会以 2.1.16 发到 npm 再到服务器上装
 
   host-pg:
     class: platform

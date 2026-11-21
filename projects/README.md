@@ -6,6 +6,8 @@
 
 2026-11-17 第四轮：这个目录只放**别人的业务项目**。从 L1 迁过来的 MX 项目和平台服务放 `services/`（`docs/27`）。
 
+2026-11-22：上一段已被 `docs/46` 取代。从 L1 迁过来的业务项目（Hub、DataPort、mx-pay 等）也放这里，**连源码一起**：一个个迁，用 `git archive` 拷提交过的文件，每个项目写 `SOURCE.md`（照 `architecture/mx-launcher/SOURCE.md`）。和 k8s 高度集成的平台（Launcher）放 `architecture/`。别人的业务项目照旧只放清单或说明。
+
 ## 结构
 
 借鉴 L1 的 mx-base：一个服务一个目录，自带说明、部署文件和入口脚本（`docs/21`）。

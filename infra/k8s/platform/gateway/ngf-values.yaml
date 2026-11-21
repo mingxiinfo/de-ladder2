@@ -24,7 +24,11 @@ nginx:
     rewriteClientIP:
       mode: XForwardedFor
       trustedAddresses:
-        # 宿主机 Nginx 转发到本机 30080 时，网关看到的来源地址。
-        # 待实测：可能是节点的 LAN 地址或 CNI 网桥地址，不一定是 127.0.0.1（docs/15）。
-        - type: IPAddress
-          value: 192.168.1.254   # 占位，装之前改成实测值
+        # 宿主机 Nginx 转发到本机 LAN 地址的 30080 时，网关看到的来源地址（docs/35）：
+        # kube-proxy 对本机发出、走 externalTrafficPolicy: Local 的流量做 SNAT，来源一般变成 flannel 网桥 cni0 的地址
+        # （第一个节点是 192.168.224.1，Pod 网段 192.168.224.0/20 的第一个 /24）；不做 SNAT 时是节点的 LAN 地址。两个都只有这台机器自己能用。
+        # 按原理推的，没实测：node verify s2 sample 会测网关认出的客户端地址对不对。阶段 B 加节点时补那台的两个地址。
+        - type: CIDR
+          value: 192.168.224.1/32
+        - type: CIDR
+          value: 192.168.1.4/32

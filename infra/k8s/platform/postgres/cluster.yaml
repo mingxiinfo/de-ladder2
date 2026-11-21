@@ -15,7 +15,7 @@ spec:
   instances: 1
   storage:
     size: 200Gi
-    storageClass: local-path     # local-path-provisioner，数据在节点的 /data/k8s/storage
+    storageClass: local-retain   # local-path-provisioner，Retain，数据在节点的 /data/k8s/storage（docs/35）
   # requests 和 limits 相同：数据库不和别的 Pod 抢资源。数字沿用 L1 的 mx-common-postgres。
   resources:
     requests:

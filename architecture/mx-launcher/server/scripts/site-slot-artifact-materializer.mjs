@@ -1,0 +1,1831 @@
+#!/usr/bin/env node
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  tunnelCliDegradedFallbackFiles,
+  tunnelCliExecutableFiles,
+  tunnelCliFullFallbackFiles,
+  tunnelCliFullFallbackReady
+} from './site-slot-tunnel-cli-contract.mjs';
+
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const mxRoot = resolveMxRoot(scriptDir);
+const args = process.argv.slice(2);
+const kind = args.find((arg) => !arg.startsWith('--')) || 'all';
+const outDirArg = optionValue('--out-dir');
+const preserveRuntimeSecrets = !args.includes('--no-preserve-runtime-secrets');
+const outputBase = resolve(outDirArg || process.env.SITE_SLOT_ARTIFACT_OUTPUT_DIR || join(mxRoot, 'artifacts/site-slots'));
+const releaseRevision = process.env.SITE_SLOT_RELEASE_REVISION || gitRevision() || timestampRevision();
+
+if (!['oversea', 'domestic', 'all'].includes(kind)) {
+  die('Usage: node server/scripts/site-slot-artifact-materializer.mjs [oversea|domestic|all] [--out-dir DIR] [--no-preserve-runtime-secrets]');
+}
+
+const materialized = [];
+if (kind === 'oversea' || kind === 'all') materialized.push(materializeOversea());
+if (kind === 'domestic' || kind === 'all') materialized.push(materializeDomestic());
+
+console.log(JSON.stringify({
+  ok: true,
+  releaseRevision,
+  outputBase,
+  artifactSets: materialized.map((manifest) => ({
+    kind: manifest.kind,
+    artifactRoot: manifest.artifactRoot,
+    modules: manifest.modules.map((module) => ({
+      moduleId: module.moduleId,
+      status: module.status,
+      artifact: module.artifact,
+      sha256: module.sha256
+    }))
+  }))
+}, null, 2));
+
+function materializeOversea() {
+  const artifactRoot = resetArtifactRoot('oversea');
+  const modules = [];
+  modules.push(createTarModule({
+    artifactRoot,
+    moduleId: 'hysteria2-access-stack',
+    artifactName: 'mx-oversea-access-stack.tar.gz',
+    targetPath: '/opt/mx/current/hysteria2-access-stack',
+    status: 'ready',
+    metadata: {
+      accessRuntime: 'hysteria2-only',
+      mihomoDeployment: 'internal-managed',
+      routingPolicy: 'cn-direct',
+      reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16'],
+      domesticGatewayIp: '10.88.0.1',
+      subscriptionStore: 'config-center',
+      healthEvidenceOutlet: {
+        port: 3434,
+        path: '/clients.csv',
+        purpose: 'protected health/evidence summary, not subscription authority'
+      },
+      tunnelCliRegistration: 'access-stack-fallback qp-tunnel-cli register'
+    },
+    notes: ['Real hysteria2 access stack module; mihomo/subscription storage stay on Internal, CN traffic stays direct, and the target host does not receive the repository root.'],
+    buildStaging: (staging) => {
+      const sourceRoot = resolve(mxRoot, 'site-slots/oversea/hysteria2-access-stack');
+      copyRequired(sourceRoot, staging, [
+        '.env.example',
+        'Caddyfile',
+        'docker-compose.yml',
+        'manage.sh',
+        'scripts/reconcile-tunnel-state.mjs',
+        'scripts/reconcile-tunnel-state.py'
+      ]);
+      writeOverseaTunnelCliShim(staging);
+      chmodIfExists(join(staging, 'manage.sh'), 0o755);
+    }
+  }));
+  modules.push(createPlaceholderServicesTar({
+    artifactRoot,
+    kind: 'oversea',
+    artifactName: 'mx-oversea-services.tar.gz',
+    targetPath: '/opt/mx/current/oversea',
+    enabledModules: ['access-node', 'site-agent', 'runner-worker', 'observability-forwarder']
+  }));
+  return writeManifest('oversea', artifactRoot, modules);
+}
+
+function materializeDomestic() {
+  const previousModules = readExistingArtifactModules('domestic');
+  // Runtime API refreshes preserve Config Center generated YAML in the
+  // runtime artifact root. Image builds explicitly disable this: ignored
+  // developer/runtime files must never become immutable image-layer secrets.
+  const previousBootstrapSubscription = preserveRuntimeSecrets
+    ? readExistingRuntimeFile('domestic', 'mx-domestic-bootstrap-subscription.yaml')
+    : null;
+  const previousInternalEgressSubscription = preserveRuntimeSecrets
+    ? readExistingRuntimeFile('domestic', 'mx-internal-egress-subscription.yaml')
+    : null;
+  const artifactRoot = resetArtifactRoot('domestic');
+  if (previousBootstrapSubscription) {
+    const bootstrapSubscriptionPath = join(artifactRoot, 'mx-domestic-bootstrap-subscription.yaml');
+    writeFileSync(bootstrapSubscriptionPath, previousBootstrapSubscription);
+    chmodSync(bootstrapSubscriptionPath, 0o600);
+  }
+  if (previousInternalEgressSubscription) {
+    const internalEgressSubscriptionPath = join(artifactRoot, 'mx-internal-egress-subscription.yaml');
+    writeFileSync(internalEgressSubscriptionPath, previousInternalEgressSubscription);
+    chmodSync(internalEgressSubscriptionPath, 0o600);
+  }
+  const modules = [];
+  modules.push(createTunnelCliTar(artifactRoot, previousModules));
+  modules.push(createRuntimeFileModule({
+    artifactRoot,
+    moduleId: 'domestic-bootstrap-subscription',
+    fileName: 'mx-domestic-bootstrap-subscription.yaml',
+    targetPath: '/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml',
+    metadata: {
+      source: 'internal-config-center',
+      purpose: 'Domestic first-egress subscription before WG relay can reach Internal',
+      containsSecret: true
+    },
+    notes: [
+      'This YAML is generated by Internal at plan creation time and preserved across artifact materialization.',
+      'It lets Domestic install/update mihomo-client from a local file before Internal is reachable at 10.88.88.88.'
+    ]
+  }));
+  modules.push(createRuntimeFileModule({
+    artifactRoot,
+    moduleId: 'internal-egress-subscription',
+    fileName: 'mx-internal-egress-subscription.yaml',
+    targetPath: '/opt/mx/current/qp-tunnel-cli/internal-egress-subscription.yaml',
+    metadata: {
+      source: 'internal-config-center',
+      purpose: 'Internal qp-tunnel-cli egress-on subscription for host outbound bootstrap',
+      containsSecret: true
+    },
+    notes: [
+      'This YAML is generated by Internal from the Oversea internal account and preserved across artifact materialization.',
+      'It lets the Internal runtime host run qp-tunnel-cli install --file followed by qp-tunnel-cli egress-on, matching the Domestic bootstrap model with an Internal identity.'
+    ]
+  }));
+  modules.push(createWireGuardTemplate(artifactRoot));
+  modules.push(createDomesticServicesTar(artifactRoot));
+  return writeManifest('domestic', artifactRoot, modules);
+}
+
+function readExistingRuntimeFile(kindValue, fileName) {
+  const filePath = join(outputBase, kindValue, fileName);
+  if (!existsSync(filePath)) return null;
+  return readFileSync(filePath);
+}
+
+function createRuntimeFileModule({ artifactRoot, moduleId, fileName, targetPath, metadata, notes }) {
+  const artifactPath = join(artifactRoot, fileName);
+  const exists = existsSync(artifactPath);
+  if (exists) chmodSync(artifactPath, 0o600);
+  const isSecret = metadata?.containsSecret === true;
+  return {
+    moduleId,
+    status: isSecret ? 'runtime-generated' : exists ? 'ready' : 'runtime-generated',
+    artifact: relative(mxRoot, artifactPath),
+    artifactPath,
+    sha256: exists && !isSecret ? sha256File(artifactPath) : null,
+    bytes: exists && !isSecret ? statSync(artifactPath).size : null,
+    targetPath,
+    metadata,
+    sourcePaths: [],
+    files: [fileName],
+    notes
+  };
+}
+
+function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
+  const sourceRoot = resolve(mxRoot, 'site-slots/domestic/qp-tunnel-cli');
+  if (!existsSync(join(sourceRoot, 'package.json'))) {
+    const restored = restoreExistingTarModule(
+      artifactRoot,
+      previousModules.get('qp-tunnel-cli'),
+      'mx-domestic-qp-tunnel-cli-fallback.tar.gz'
+    );
+    if (restored) return restored;
+    die(`Missing required artifact source: ${join(sourceRoot, 'package.json')}`);
+  }
+  const packageJson = JSON.parse(readFileSync(join(sourceRoot, 'package.json'), 'utf8'));
+  const fullFallbackReady = tunnelCliFullFallbackReady(sourceRoot) && tunnelCliRuntimeReady();
+  const allowDegraded = process.env.MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI !== '0';
+  if (!fullFallbackReady && !allowDegraded) {
+    die(`Missing required qp-tunnel-cli fallback dist or WireGuard runtime. Re-run after refreshing ${sourceRoot}, or set MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI=1 for server-safe materialization.`);
+  }
+  return createTarModule({
+    artifactRoot,
+    moduleId: 'qp-tunnel-cli',
+    artifactName: 'mx-domestic-qp-tunnel-cli-fallback.tar.gz',
+    rootOwnedArchive: true,
+    targetPath: '/opt/mx/current/qp-tunnel-cli',
+    status: 'ready',
+    metadata: {
+      packageName: packageJson.name,
+      packageVersion: packageJson.version,
+      npmInstallCommand: 'npm i -g @qpjoy/tunnel-cli@latest --force',
+      refreshCommand: 'bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest | bash scripts/manage.sh ops site-slot refresh-tunnel-cli --from-tarball <tgz>',
+      fallbackMode: fullFallbackReady
+        ? 'node-capable-qp-tunnel-cli-with-launcher-standalone-and-electron-core-wireguard'
+        : 'server-safe-mihomo-shell-fallback-without-electron-plugin-build',
+      bootstrapMode: 'Internal-pushed no-node/no-outbound first'
+    },
+    notes: fullFallbackReady
+      ? ['Domestic and Internal host-runner bootstrap use this Internal-pushed fallback before node/npm or registry egress exists; refresh it from npm pack or a published tarball when @qpjoy/tunnel-cli changes.']
+      : ['Server-safe degraded qp-tunnel-cli fallback was materialized without compiling electron-plugin/native dependencies. It is enough for Internal API image build; refresh from a built @qpjoy/tunnel-cli tarball before relying on Domestic offline qp-tunnel-cli node commands.'],
+    buildStaging: (staging) => {
+      copyRequired(
+        sourceRoot,
+        join(staging, 'package'),
+        fullFallbackReady ? tunnelCliFullFallbackFiles : tunnelCliDegradedFallbackFiles
+      );
+      const binDir = join(staging, 'bin');
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(join(binDir, 'qp-tunnel-cli'), [
+        '#!/usr/bin/env sh',
+        'set -eu',
+        'ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"',
+        'NODE_CLI="$ROOT/package/dist/index.js"',
+        'H2I_COMMAND=0',
+        'case "${1:-}" in',
+        '  h2i|h2i-enroll) H2I_COMMAND=1 ;;',
+        'esac',
+        'if [ -f "$NODE_CLI" ] && command -v node >/dev/null 2>&1; then',
+        '  NODE_MAJOR="$(node -p \'process.versions.node.split(".")[0]\' 2>/dev/null || true)"',
+        '  case "$NODE_MAJOR" in',
+        '    \'\'|*[!0-9]*) NODE_MAJOR=0 ;;',
+        '  esac',
+        '  if [ "$NODE_MAJOR" -ge 18 ]; then',
+        '    exec node "$NODE_CLI" "$@"',
+        '  fi',
+        '  if [ "$H2I_COMMAND" -eq 1 ]; then',
+        '    NODE_VERSION="$(node --version 2>/dev/null || echo unknown)"',
+        '    echo "qp-tunnel-cli h2i requires Node.js 18 or newer; found $NODE_VERSION." >&2',
+        '    exit 1',
+        '  fi',
+        'fi',
+        'if [ "$H2I_COMMAND" -eq 1 ]; then',
+        '  if [ ! -f "$NODE_CLI" ]; then',
+        '    echo "qp-tunnel-cli h2i requires the packaged Node CLI runtime ($NODE_CLI), but it is missing." >&2',
+        '  else',
+        '    echo "qp-tunnel-cli h2i requires Node.js 18 or newer, but node was not found on PATH." >&2',
+        '  fi',
+        '  exit 1',
+        'fi',
+        'exec "$ROOT/package/resources/mihomo-client.sh" "$@"',
+        ''
+      ].join('\n'));
+      copyTunnelCliRuntimeDependencies(staging, { allowMissing: !fullFallbackReady });
+      chmodIfExists(join(binDir, 'qp-tunnel-cli'), 0o755);
+      for (const file of tunnelCliExecutableFiles) {
+        chmodIfExists(join(staging, 'package', file), 0o755);
+      }
+    }
+  });
+}
+
+function tunnelCliRuntimeReady() {
+  const electronPluginRoot = resolve(mxRoot, '../../electron-plugin');
+  const coreSource = join(electronPluginRoot, 'packages/electron-core-wireguard');
+  const packageRuntimeFiles = ['package.json', 'README.md', 'dist/index.js', 'dist/index.d.ts'];
+  if (!packageRuntimeFiles.every((file) => existsSync(join(coreSource, file)))) return false;
+  for (const packageName of ['launcher-core', 'launcher-standalone']) {
+    const packageRoot = join(mxRoot, 'packages', packageName);
+    if (!packageRuntimeFiles.every((file) => existsSync(join(packageRoot, file)))) return false;
+  }
+  const engineRuntimeFiles = {
+    'darwin-arm64': ['wg', 'wireguard-go'],
+    'darwin-x64': ['wg', 'wireguard-go'],
+    'linux-arm64': ['wg', 'wg-quick'],
+    'linux-x64': ['wg', 'wg-quick'],
+    'win32-x64': ['wg.exe', 'wireguard.exe']
+  };
+  return Object.entries(engineRuntimeFiles).every(([engine, binaries]) => {
+    const engineSource = join(electronPluginRoot, `packages/wireguard-engines/${engine}`);
+    return [
+      'package.json',
+      'README.md',
+      ...binaries.map((binary) => `resources/wireguard/${engine}/${binary}`)
+    ].every((file) => existsSync(join(engineSource, file)));
+  });
+}
+
+function copyTunnelCliRuntimeDependencies(staging, options = {}) {
+  const allowMissing = Boolean(options.allowMissing);
+  const electronPluginRoot = resolve(mxRoot, '../../electron-plugin');
+  const coreSource = join(electronPluginRoot, 'packages/electron-core-wireguard');
+  if (!existsSync(join(coreSource, 'package.json'))) {
+    if (allowMissing) return;
+    die(`Missing required WireGuard runtime package: ${coreSource}`);
+  }
+  const targetScope = join(staging, 'node_modules/@qpjoy');
+  copyPackageRuntime(coreSource, join(targetScope, 'electron-core-wireguard'), [
+    'package.json',
+    'README.md',
+    'dist'
+  ], { allowMissing });
+  for (const packageName of ['launcher-core', 'launcher-standalone']) {
+    const packageSource = join(mxRoot, 'packages', packageName);
+    if (!existsSync(join(packageSource, 'package.json'))) {
+      if (allowMissing) continue;
+      die(`Missing required MX Launcher runtime package: ${packageSource}`);
+    }
+    copyPackageRuntime(packageSource, join(targetScope, `mx-${packageName}`), [
+      'package.json',
+      'README.md',
+      'dist'
+    ], { allowMissing });
+  }
+  for (const engine of ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64']) {
+    const engineSource = join(electronPluginRoot, `packages/wireguard-engines/${engine}`);
+    if (!existsSync(join(engineSource, 'package.json'))) {
+      if (allowMissing) continue;
+      die(`Missing required WireGuard engine package: ${engineSource}`);
+    }
+    copyPackageRuntime(engineSource, join(targetScope, `electron-core-wireguard-engine-${engine}`), [
+      'package.json',
+      'README.md',
+      'resources'
+    ], { allowMissing });
+    chmodWireGuardEngineBins(join(targetScope, `electron-core-wireguard-engine-${engine}/resources/wireguard`));
+  }
+}
+
+function copyPackageRuntime(sourceRoot, targetRoot, files, options = {}) {
+  rmSync(targetRoot, { recursive: true, force: true });
+  if (options.allowMissing) {
+    copyOptional(sourceRoot, targetRoot, files);
+    return;
+  }
+  copyRequired(sourceRoot, targetRoot, files);
+}
+
+function chmodWireGuardEngineBins(root) {
+  for (const target of [
+    'darwin-arm64/wg',
+    'darwin-arm64/wg-quick',
+    'darwin-arm64/wireguard-go',
+    'darwin-x64/wg',
+    'darwin-x64/wg-quick',
+    'darwin-x64/wireguard-go',
+    'linux-arm64/wg',
+    'linux-arm64/wg-quick',
+    'linux-x64/wg',
+    'linux-x64/wg-quick',
+    'win32-x64/wg.exe',
+    'win32-x64/wireguard.exe'
+  ]) {
+    chmodIfExists(join(root, target), 0o755);
+  }
+}
+
+function writeOverseaTunnelCliShim(staging) {
+  const binDir = join(staging, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, 'qp-tunnel-cli'), [
+    '#!/usr/bin/env sh',
+    'set -eu',
+    '',
+    'usage() {',
+    '  cat <<\'EOF\'',
+    'Usage:',
+    '  qp-tunnel-cli register --internal URL --role ROLE --site SITE [--service SERVICE] [--subscription URL]',
+    '',
+    'This access-stack fallback records site-agent registration intent locally.',
+    'EOF',
+    '}',
+    '',
+    'json_escape() {',
+    '  printf "%s" "$1" | sed \'s/\\\\/\\\\\\\\/g; s/"/\\\\"/g\'',
+    '}',
+    '',
+    'cmd="${1:-help}"',
+    'if [ "$cmd" = "help" ] || [ "$cmd" = "--help" ] || [ "$cmd" = "-h" ]; then',
+    '  usage',
+    '  exit 0',
+    'fi',
+    'if [ "$cmd" != "register" ]; then',
+    '  echo "Error: unsupported qp-tunnel-cli fallback command: $cmd" >&2',
+    '  usage >&2',
+    '  exit 64',
+    'fi',
+    'shift',
+    '',
+    'internal=""',
+    'role=""',
+    'site=""',
+    'service=""',
+    'subscription=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    --internal) internal="${2:-}"; shift 2 ;;',
+    '    --role) role="${2:-}"; shift 2 ;;',
+    '    --site) site="${2:-}"; shift 2 ;;',
+    '    --service) service="${2:-}"; shift 2 ;;',
+    '    --subscription) subscription="${2:-}"; shift 2 ;;',
+    '    *) echo "Error: unknown register option: $1" >&2; exit 64 ;;',
+    '  esac',
+    'done',
+    '',
+    '[ -n "$internal" ] || { echo "Error: --internal is required" >&2; exit 64; }',
+    '[ -n "$role" ] || { echo "Error: --role is required" >&2; exit 64; }',
+    '[ -n "$site" ] || { echo "Error: --site is required" >&2; exit 64; }',
+    '',
+    'agent_dir="${MX_SITE_AGENT_DIR:-/opt/mx/site-agent}"',
+    'mkdir -p "$agent_dir"',
+    'registered_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"',
+    'registration_file="$agent_dir/registration.json"',
+    'env_file="$agent_dir/registration.env"',
+    '',
+    '{',
+    '  printf "{\\n"',
+    '  printf "  \\"registeredAt\\": \\"%s\\",\\n" "$(json_escape "$registered_at")"',
+    '  printf "  \\"mode\\": \\"access-stack-fallback\\",\\n"',
+    '  printf "  \\"internalBaseUrl\\": \\"%s\\",\\n" "$(json_escape "$internal")"',
+    '  printf "  \\"role\\": \\"%s\\",\\n" "$(json_escape "$role")"',
+    '  printf "  \\"site\\": \\"%s\\",\\n" "$(json_escape "$site")"',
+    '  printf "  \\"service\\": \\"%s\\",\\n" "$(json_escape "$service")"',
+    '  printf "  \\"subscription\\": \\"%s\\"\\n" "$(json_escape "$subscription")"',
+    '  printf "}\\n"',
+    '} > "$registration_file"',
+    '',
+    '{',
+    '  printf "MX_INTERNAL_BASE_URL=%s\\n" "$internal"',
+    '  printf "MX_SITE_ROLE=%s\\n" "$role"',
+    '  printf "MX_SITE_ID=%s\\n" "$site"',
+    '  printf "MX_SITE_SERVICE=%s\\n" "$service"',
+    '  printf "MX_SITE_SUBSCRIPTION=%s\\n" "$subscription"',
+    '} > "$env_file"',
+    '',
+    'chmod 600 "$registration_file" "$env_file" 2>/dev/null || true',
+    'echo "mx-site-agent-register-shim"',
+    'echo "site: $site"',
+    'echo "role: $role"',
+    'echo "service: ${service:-none}"',
+    'echo "registration: $registration_file"',
+    ''
+  ].join('\n'));
+  chmodIfExists(join(binDir, 'qp-tunnel-cli'), 0o755);
+}
+
+function createWireGuardTemplate(artifactRoot) {
+  const material = domesticWireGuardMaterial();
+  const relayConfigPath = join(artifactRoot, 'mx-domestic-wg-relay.conf');
+  const compatibilityConfigPath = join(artifactRoot, 'mx-domestic-wg.conf');
+  const internalPeerConfigPath = join(artifactRoot, 'mx-internal-service-peer.conf');
+  const internalPeerApplyPath = join(artifactRoot, 'mx-internal-service-peer-apply.sh');
+  const relayEnvPath = join(artifactRoot, 'mx-domestic-relay.env');
+  const productRelayCidrs = uniqueStrings(material.productRelayCidrs);
+  const internalRouteCidrs = uniqueStrings([`${material.domesticGatewayIp}/32`, material.domesticGatewayCidr, ...productRelayCidrs]);
+  const internalServiceAllowedIps = uniqueStrings([
+    `${material.internalServiceIp}/32`,
+    ...productRelayCidrs.filter((cidr) => cidr.endsWith('/32') && cidr !== `${material.domesticGatewayIp}/32`)
+  ]);
+  const relayConfig = [
+    material.ready
+      ? '# MX Domestic WireGuard relay generated by Artifact Materializer V1.'
+      : '# MX Domestic WireGuard relay template generated by Artifact Materializer V1.',
+    material.ready
+      ? '# Internal injected key material before artifact publication.'
+      : '# Internal owns key material. Replace placeholders before real apply.',
+    `# Domestic is the public relay: it listens on ${material.listenPort} and owns ${material.domesticGatewayIp}.`,
+    '[Interface]',
+    `Address = ${material.domesticGatewayIp}/16`,
+    `ListenPort = ${material.listenPort}`,
+    `PrivateKey = ${material.domesticRelayPrivateKey}`,
+    'Table = off',
+    'SaveConfig = false',
+    'PostUp = sysctl -w net.ipv4.ip_forward=1',
+    ...wireGuardForwardingCommands('PostUp'),
+    ...wireGuardRouteCommands('PostUp', productRelayCidrs),
+    ...wireGuardRouteCommands('PostDown', productRelayCidrs, true),
+    '',
+    '# Internal service peer. Internal has no public ingress and dials this relay outbound.',
+    '[Peer]',
+    `PublicKey = ${material.internalServicePublicKey}`,
+    `AllowedIPs = ${internalServiceAllowedIps.join(',')}`,
+    '',
+    '# Home peers are appended by Internal-signed product relay leases after enroll.',
+    `# Product relay CIDRs: ${productRelayCidrs.join(',')}.`,
+    ''
+  ].join('\n');
+  const internalPeerConfig = [
+    material.ready
+      ? '# MX Internal service peer generated by Artifact Materializer V1.'
+      : '# MX Internal service peer template generated by Artifact Materializer V1.',
+    '# Apply inside Internal runtime so Internal can reach Domestic relay without public ingress.',
+    '[Interface]',
+    `Address = ${internalServiceAllowedIps.join(', ')}`,
+    `PrivateKey = ${material.internalServicePrivateKey}`,
+    ...(material.internalDirectEnabled ? [`ListenPort = ${material.internalDirectListenPort}`] : []),
+    '# DNS is managed by Internal DNS/CoreDNS; keep wg-quick from mutating host resolv.conf.',
+    'Table = off',
+    ...wireGuardRouteCommands('PostUp', internalRouteCidrs),
+    ...wireGuardRouteCommands('PostDown', internalRouteCidrs, true),
+    '',
+    '[Peer]',
+    `PublicKey = ${material.domesticRelayPublicKey}`,
+    `Endpoint = ${material.domesticEndpoint}`,
+    `AllowedIPs = ${internalRouteCidrs.join(',')}`,
+    'PersistentKeepalive = 25',
+    ''
+  ].join('\n');
+  const internalPeerApply = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"',
+    'IFACE="${MX_INTERNAL_SERVICE_WG_INTERFACE:-mx-internal-svc}"',
+    'CONFIG_SOURCE="${1:-$SCRIPT_DIR/mx-internal-service-peer.conf}"',
+    'TARGET="/etc/wireguard/${IFACE}.conf"',
+    'OS_NAME="$(uname -s)"',
+    '',
+    'if [ "${#IFACE}" -gt 15 ]; then',
+    '  echo "blocked: WireGuard interface name must be 15 characters or fewer: $IFACE" >&2',
+    '  exit 1',
+    'fi',
+    '',
+    'if [ ! -f "$CONFIG_SOURCE" ]; then',
+    '  echo "blocked: Internal service peer config not found: $CONFIG_SOURCE" >&2',
+    '  exit 1',
+    'fi',
+    '',
+    'PRIVATE_KEY="$(awk \'/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}\' "$CONFIG_SOURCE" | sed \'s/^[[:space:]]*//;s/[[:space:]]*$//\')"',
+    'if printf "%s" "$PRIVATE_KEY" | grep -q "[<>]"; then',
+    '  echo "blocked: Internal service peer config still contains a placeholder private key: $CONFIG_SOURCE" >&2',
+    '  exit 1',
+    'fi',
+    'if ! printf "%s" "$PRIVATE_KEY" | grep -Eq "^[A-Za-z0-9+/]{43}=$"; then',
+    '  echo "blocked: Internal service peer private key is missing or invalid: $CONFIG_SOURCE" >&2',
+    '  exit 1',
+    'fi',
+    '',
+    'install -d -m 700 /etc/wireguard',
+    '',
+    'internal_route_cidrs() {',
+    '  awk \'BEGIN { in_peer=0 } /^\\[Peer\\]/ { in_peer=1; next } /^\\[/ { in_peer=0 } in_peer && /^[[:space:]]*AllowedIPs[[:space:]]*=/ { sub(/^[^=]+=/, ""); print }\' "$CONFIG_SOURCE" \\',
+    '    | tr "," "\\n" \\',
+    '    | sed "s/^[[:space:]]*//;s/[[:space:]]*$//" \\',
+    '    | grep -E "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+/[0-9]+$" \\',
+    '    | sort -u',
+    '}',
+    '',
+    'if [ "$OS_NAME" = "Darwin" ]; then',
+    '  awk \'!/^[[:space:]]*Post(Up|Down)[[:space:]]*=[[:space:]]*ip route / { print }\' "$CONFIG_SOURCE" > "$TARGET"',
+    '  chmod 600 "$TARGET"',
+    '  wg-quick down "$TARGET" >/dev/null 2>&1 || wg-quick down "$IFACE" >/dev/null 2>&1 || true',
+    '  wg-quick up "$TARGET"',
+    '  REAL_IFACE="$(route -n get 10.88.0.1 2>/dev/null | awk \'/interface:/{print $2; exit}\')"',
+    '  if [ -z "$REAL_IFACE" ]; then',
+    '    echo "blocked: unable to resolve Darwin WireGuard utun for 10.88.0.1" >&2',
+    '    exit 1',
+    '  fi',
+    '  while IFS= read -r cidr; do',
+    '    [ -n "$cidr" ] || continue',
+    '    route -q -n delete -net "$cidr" >/dev/null 2>&1 || true',
+    '    route -q -n add -net "$cidr" -interface "$REAL_IFACE" >/dev/null 2>&1 || route -q -n change -net "$cidr" -interface "$REAL_IFACE"',
+    '  done < <(internal_route_cidrs)',
+    '  wg show "$REAL_IFACE" || wg show "$IFACE" || true',
+    '  route -n get 10.88.0.1 || true',
+    '  route -n get 10.89.100.1 || true',
+    '  exit 0',
+    'fi',
+    '',
+    'install -m 600 -o root -g root "$CONFIG_SOURCE" "$TARGET"',
+    '',
+    'if command -v systemctl >/dev/null 2>&1; then',
+    '  systemctl enable --now "wg-quick@${IFACE}"',
+    '  systemctl restart "wg-quick@${IFACE}"',
+    'else',
+    '  wg-quick down "$IFACE" >/dev/null 2>&1 || true',
+    '  wg-quick up "$IFACE"',
+    'fi',
+    '',
+    'wg show "$IFACE"',
+    'wg show "$IFACE" latest-handshakes || true',
+    'ip route get 10.88.0.1 || true',
+    ''
+  ].join('\n');
+  const relayEnv = [
+    `MX_DOMESTIC_WG_SECRET_STATUS=${material.ready ? 'ready' : 'template'}`,
+    `MX_DOMESTIC_PUBLIC_ENDPOINT=${material.domesticEndpoint}`,
+    `MX_DOMESTIC_GATEWAY_IP=${material.domesticGatewayIp}`,
+    `MX_INTERNAL_SERVICE_IP=${material.internalServiceIp}`,
+    'MX_WG_INTERFACE=mx-domestic',
+    `MX_WG_LISTEN_PORT=${material.listenPort}`,
+    `MX_INTERNAL_DIRECT_ENABLED=${material.internalDirectEnabled ? '1' : '0'}`,
+    `MX_INTERNAL_DIRECT_ENDPOINT=${material.internalDirectEndpoint ?? ''}`,
+    `MX_INTERNAL_DIRECT_LISTEN_PORT=${material.internalDirectListenPort}`,
+    'MX_PUBLIC_FACADE_MODE=bootstrap-only',
+    'MX_STEADY_STATE_ACCESS=domestic-wg-relay-primary',
+    `MX_PRODUCT_RELAY_CIDRS=${material.productRelayCidrs.join(',')}`,
+    `MX_USER_RELAY_CIDR=${material.userRelayCidr}`,
+    `MX_INTERNAL_SERVICE_CIDR=${material.internalServiceCidr}`,
+    `MX_GUEST_RELAY_CIDR=${material.guestRelayCidr}`,
+    ''
+  ].join('\n');
+  writeFileSync(relayConfigPath, relayConfig);
+  writeFileSync(compatibilityConfigPath, relayConfig);
+  writeFileSync(internalPeerConfigPath, internalPeerConfig);
+  chmodIfExists(relayConfigPath, 0o600);
+  chmodIfExists(compatibilityConfigPath, 0o600);
+  chmodIfExists(internalPeerConfigPath, 0o600);
+  writeFileSync(internalPeerApplyPath, internalPeerApply);
+  chmodIfExists(internalPeerApplyPath, 0o755);
+  writeFileSync(relayEnvPath, relayEnv);
+  const bytes = [relayConfigPath, compatibilityConfigPath, internalPeerConfigPath, internalPeerApplyPath, relayEnvPath]
+    .reduce((sum, file) => sum + statSync(file).size, 0);
+  return {
+    moduleId: 'wireguard-config',
+    status: material.ready ? 'ready' : 'template',
+    artifact: relative(mxRoot, relayConfigPath),
+    artifactPath: relayConfigPath,
+    sha256: sha256File(relayConfigPath),
+    bytes,
+    targetPath: '/etc/wireguard/mx-domestic.conf',
+    sourcePaths: [],
+    files: ['mx-domestic-wg-relay.conf', 'mx-domestic-wg.conf', 'mx-internal-service-peer.conf', 'mx-internal-service-peer-apply.sh', 'mx-domestic-relay.env'],
+	    metadata: {
+	      publicEndpoint: material.domesticEndpoint,
+	      domesticGatewayIp: material.domesticGatewayIp,
+	      domesticGatewayCidr: material.domesticGatewayCidr,
+	      internalServicePeerIp: material.internalServiceIp,
+      listenPort: material.listenPortNumber,
+      internalDirectEnabled: material.internalDirectEnabled,
+      internalDirectEndpoint: material.internalDirectEndpoint,
+      internalDirectListenPort: material.internalDirectListenPortNumber,
+      hdiWithoutRelay: 'bootstrap-proxy-only',
+      steadyStateAccess: 'domestic-wg-relay-primary',
+      productRelayCidrs,
+      userRelayCidr: material.userRelayCidr,
+      internalServiceCidr: material.internalServiceCidr,
+      guestRelayCidr: material.guestRelayCidr,
+      publicEndpointStatus: material.endpointReady ? 'ready' : 'placeholder',
+      secretMaterial: material.ready ? 'injected' : 'placeholder',
+      filesContainPlaceholders: !material.ready,
+      missingSecretInputs: material.missingInputs,
+      internalServicePeerApplyScript: 'mx-internal-service-peer-apply.sh'
+    },
+    notes: material.ready
+      ? [
+          'Internal injected WireGuard material before artifact publication; manifest metadata intentionally redacts secret values.',
+          'Domestic installs mx-domestic-wg-relay.conf; Internal consumes mx-internal-service-peer.conf to dial the public relay outbound.'
+        ]
+      : [
+          'Template artifact only; Internal secret injection must replace placeholders before real apply.',
+          'Remote SSH gates must block this module until secretMaterial becomes injected.',
+          'Domestic installs mx-domestic-wg-relay.conf; Internal consumes mx-internal-service-peer.conf to dial the public relay outbound.'
+        ]
+  };
+}
+
+function wireGuardRouteCommands(prefix, cidrs, ignoreFailure = false) {
+  return cidrs.map((cidr) => {
+    const command = prefix === 'PostDown'
+      ? `ip route del ${cidr} dev %i`
+      : `ip route replace ${cidr} dev %i`;
+    return `${prefix} = ${ignoreFailure ? `${command} || true` : command}`;
+  });
+}
+
+function wireGuardForwardingCommands(prefix) {
+  if (prefix !== 'PostUp') return [];
+  return [
+    'PostUp = if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i %i -o %i -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i %i -o %i -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i %i -o %i -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i %i -o %i -j ACCEPT; fi; iptables -C INPUT -i %i -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i %i -p udp --dport 53 -j ACCEPT; iptables -C INPUT -i %i -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i %i -p tcp --dport 53 -j ACCEPT; fi'
+  ];
+}
+
+function domesticWireGuardMaterial() {
+  // Image artifacts are contracts/templates only. Even if an operator's
+  // shell exports live WG material, the image build must not consume it.
+  const runtimeValue = (name) => preserveRuntimeSecrets ? envValue(name) : '';
+  const listenPort = runtimeValue('MX_WG_LISTEN_PORT') || '51280';
+  const listenPortNumber = Number.parseInt(listenPort, 10) || 51280;
+  const internalDirectEnabled = preserveRuntimeSecrets ? envBool('MX_INTERNAL_DIRECT_ENABLED', true) : true;
+  const internalDirectListenPort = runtimeValue('MX_INTERNAL_DIRECT_LISTEN_PORT') || '51280';
+  const internalDirectListenPortNumber = Number.parseInt(internalDirectListenPort, 10) || 51280;
+  const internalDirectEndpoint = runtimeValue('MX_INTERNAL_DIRECT_ENDPOINT');
+  const domesticGatewayIp = runtimeValue('MX_DOMESTIC_GATEWAY_IP') || '10.88.0.1';
+  const internalServiceIp = runtimeValue('MX_INTERNAL_SERVICE_IP') || '10.88.88.88';
+  const domesticGatewayCidr = runtimeValue('MX_DOMESTIC_GATEWAY_CIDR') || '10.88.0.0/16';
+  const userRelayCidr = runtimeValue('MX_USER_RELAY_CIDR') || '10.89.0.0/16';
+  const internalServiceCidr = runtimeValue('MX_INTERNAL_SERVICE_CIDR') || '10.88.0.0/16';
+  const guestRelayCidr = runtimeValue('MX_GUEST_RELAY_CIDR') || '10.90.0.0/16';
+  const productRelayCidrs = parseCsv(runtimeValue('MX_PRODUCT_RELAY_CIDRS') || `${userRelayCidr},${guestRelayCidr}`)
+    .filter((cidr) => /^10\.\d{1,3}\.0\.0\/16$/.test(cidr) || /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}\/32$/.test(cidr));
+  const endpoint = runtimeValue('MX_DOMESTIC_PUBLIC_ENDPOINT')
+    || (runtimeValue('MX_DOMESTIC_PUBLIC_HOST') ? `${runtimeValue('MX_DOMESTIC_PUBLIC_HOST')}:${listenPort}` : '<domestic-public-ip>:51280');
+  const required = [
+    ['MX_DOMESTIC_RELAY_PRIVATE_KEY', '<domestic-relay-private-key-from-internal-secret>'],
+    ['MX_DOMESTIC_RELAY_PUBLIC_KEY', '<domestic-relay-public-key-from-internal-secret>'],
+    ['MX_INTERNAL_SERVICE_PRIVATE_KEY', '<internal-service-private-key-from-internal-secret>'],
+    ['MX_INTERNAL_SERVICE_PUBLIC_KEY', '<internal-service-public-key-from-internal-secret>']
+  ];
+  const missingInputs = [];
+  const values = {};
+  for (const [name, placeholder] of required) {
+    const value = runtimeValue(name);
+    const valid = validWireGuardKeyMaterial(value);
+    values[name] = valid ? value : placeholder;
+    if (!valid) missingInputs.push(name);
+  }
+  const endpointReady = !endpoint.includes('<');
+  if (!endpointReady) missingInputs.push('MX_DOMESTIC_PUBLIC_ENDPOINT');
+  return {
+    ready: missingInputs.length === 0,
+    endpointReady,
+    missingInputs,
+    listenPort,
+    listenPortNumber,
+    internalDirectEnabled,
+    internalDirectEndpoint,
+    internalDirectListenPort: String(internalDirectListenPortNumber),
+    internalDirectListenPortNumber,
+    domesticGatewayIp,
+    internalServiceIp,
+    domesticGatewayCidr,
+    productRelayCidrs: productRelayCidrs.length ? uniqueStrings(productRelayCidrs) : ['10.89.0.0/16', '10.90.0.0/16'],
+    userRelayCidr,
+    internalServiceCidr,
+    guestRelayCidr,
+    domesticEndpoint: endpoint,
+    domesticRelayPrivateKey: values.MX_DOMESTIC_RELAY_PRIVATE_KEY,
+    domesticRelayPublicKey: values.MX_DOMESTIC_RELAY_PUBLIC_KEY,
+    internalServicePrivateKey: values.MX_INTERNAL_SERVICE_PRIVATE_KEY,
+    internalServicePublicKey: values.MX_INTERNAL_SERVICE_PUBLIC_KEY
+  };
+}
+
+function validWireGuardKeyMaterial(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
+}
+
+function createDomesticServicesTar(artifactRoot) {
+  return createTarModule({
+    artifactRoot,
+    moduleId: 'domestic-services',
+    artifactName: 'mx-domestic-services.tar.gz',
+    targetPath: '/opt/mx/current/domestic',
+    status: 'ready',
+    metadata: {
+      runtime: 'docker-compose',
+      defaultServices: ['domestic-edge'],
+      optionalProfiles: ['dns', 'public-tls'],
+      enabledModules: ['relay-facade', 'h2i-proxy', 'api-proxy', 'snapshot-cache', 'observability-forwarder'],
+      edgePort: 18090,
+      publicHttpsPort: 443,
+      bootstrapHost: 'h2i.minsight-ai.com',
+      publicGatewayNetwork: 'compass-gateway_default',
+      publicGatewayUpstream: 'http://mx-domestic-edge:8088',
+      dnsBind: '10.88.0.1',
+      dnsPort: 53,
+      internalApiUpstream: 'http://10.88.88.88:18090',
+      internalDnsUpstream: '10.88.88.88:53',
+      publicFacadeMode: 'bootstrap-and-relay'
+    },
+    notes: [
+      'Minimal runnable Domestic edge stack: loopback Caddy exposes health/evidence/snapshot cache and relays only the explicit MX-H2I bootstrap/OAuth/launcher-network allowlist to Internal over the Domestic WG path.',
+      'Trusted public HTTPS is terminated by the official Compass nginx 443 owner; an opt-in Compose override joins domestic-edge to its external network without making Compass a dependency of the default stack.',
+      'CoreDNS edge cache is shipped but disabled by default through the dns profile so a host without mx-domestic can still start the edge stack safely.',
+      'Domestic remains relay/cache only; User Center, RBAC, DNS authority, subscriptions, and release truth stay in Internal.'
+    ],
+    buildStaging: (staging) => {
+      writeDomesticServicesReadme(staging);
+      writeDomesticServicesCompose(staging);
+      writeDomesticPublicGatewayCompose(staging);
+      writeDomesticServicesCaddyfile(staging);
+      writeDomesticPublicTlsCaddyfile(staging);
+      writeDomesticServicesCorefile(staging);
+      writeDomesticServicesManage(staging);
+      writeFileSync(join(staging, '.env.example'), [
+        'MX_SITE_ID=domestic-main',
+        'MX_SITE_ROLE=domestic',
+        'MX_INTERNAL_BASE_URL=http://10.88.88.88:18090',
+        'MX_INTERNAL_API_UPSTREAM=http://10.88.88.88:18090',
+        'MX_INTERNAL_H2I_UPSTREAM=http://10.88.88.88:18090',
+        'MX_DOMESTIC_EDGE_BIND=127.0.0.1',
+        'MX_DOMESTIC_EDGE_PORT=18090',
+        'MX_DOMESTIC_BOOTSTRAP_HOST=h2i.minsight-ai.com',
+        'MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK=compass-gateway_default',
+        'MX_DOMESTIC_HTTPS_BIND=0.0.0.0',
+        'MX_DOMESTIC_HTTPS_PORT=443',
+        'MX_DOMESTIC_DNS_BIND=10.88.0.1',
+        'MX_DOMESTIC_DNS_PORT=53',
+        ''
+      ].join('\n'));
+      writeFileSync(join(staging, 'enabled-modules.json'), JSON.stringify({
+        kind: 'domestic',
+        placeholder: false,
+        enabledModules: ['relay-facade', 'h2i-proxy', 'api-proxy', 'snapshot-cache', 'observability-forwarder'],
+        defaultServices: ['domestic-edge'],
+        optionalProfiles: ['dns', 'public-tls']
+      }, null, 2));
+      mkdirSync(join(staging, 'data/evidence'), { recursive: true });
+      mkdirSync(join(staging, 'data/snapshots'), { recursive: true });
+      mkdirSync(join(staging, 'data/caddy'), { recursive: true });
+      mkdirSync(join(staging, 'config/caddy'), { recursive: true });
+      mkdirSync(join(staging, 'data/caddy-public-tls'), { recursive: true });
+      mkdirSync(join(staging, 'config/caddy-public-tls'), { recursive: true });
+      writeFileSync(join(staging, 'data/evidence/README.md'), [
+        '# Domestic Evidence Outlet',
+        '',
+        'Internal-pushed health and probe evidence can be mirrored here for H endpoint diagnostics.',
+        ''
+      ].join('\n'));
+      writeFileSync(join(staging, 'data/snapshots/README.md'), [
+        '# Domestic Snapshot Cache',
+        '',
+        'Internal-signed config snapshots can be cached here. Domestic does not become config truth.',
+        ''
+      ].join('\n'));
+      chmodIfExists(join(staging, 'manage.sh'), 0o755);
+    }
+  });
+}
+
+function writeDomesticServicesReadme(staging) {
+  writeFileSync(join(staging, 'README.md'), [
+    '# MX Domestic Edge Stack',
+    '',
+    'This module is the minimal runnable Domestic service bundle pushed by Internal.',
+    '',
+    'Domestic responsibilities:',
+    '- keep the public bootstrap/relay surface small;',
+    '- relay only the explicit MX-H2I bootstrap, OAuth, enrollment, and lease-operation allowlist back to Internal over the Domestic WireGuard path;',
+    '- reject generic `/internal/*`, `/api/*`, and `/h2i/*` proxying so Config Center, Admin, DNS, and other management APIs never become public by path accident;',
+    '- expose health, evidence, and snapshot-cache files for diagnostics;',
+    '- optionally run a CoreDNS edge cache on `10.88.0.1:53` and forward Internal lookups to the live authority on `10.88.88.88:53`.',
+    '- fail closed when the Internal DNS authority is unavailable; never return a public bootstrap A record for an Internal split-DNS query.',
+    '',
+    'Internal remains the source of truth for users, RBAC, DNS authority, subscriptions, config snapshots, release state, and evidence history.',
+    '',
+    'Runtime configuration:',
+    '- Internal Config Center stores the Domestic runtime config and renders `.env` during the site-slot artifact deploy phase.',
+    '- `.env.example` is only a local fallback for manually unpacked bundles; do not SSH into Domestic to hand-edit `.env` during normal operation.',
+    '- Update edge ports, bootstrap DNS names, Internal upstreams, and DNS bind addresses from the Internal Admin/Config Center, then recreate/apply the Domestic plan.',
+    '- Public login/enrollment uses `https://${MX_DOMESTIC_BOOTSTRAP_HOST:-h2i.minsight-ai.com}` on TCP 443. Production uses the official Compass nginx owner and the opt-in `docker-compose.public-gateway.yml` integration.',
+    '- When the external `${MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK:-compass-gateway_default}` network exists, normal `./manage.sh up` auto-enables the public-gateway override. `./manage.sh up-public-gateway` is the explicit fail-closed form. The choice is persisted under `data/`, so later `up`, `restart`, and Config Center apply operations keep the attachment.',
+    '- Compass nginx reaches this service at `http://mx-domestic-edge:8088`; it must enforce the same method-and-path allowlist as `Caddyfile.public-tls`, never proxy the whole `/internal/*`, `/api/*`, or `/h2i/*` namespace.',
+    '- The 443 owner must overwrite (not append or trust) the inbound `X-Forwarded-For` value with the socket client IP before proxying. The loopback edge preserves only that cleaned value for the one-hop Internal trust-proxy setting.',
+    '- `./manage.sh up-public-tls` is a non-Compass recovery/dev fallback only. It refuses to start while the official Compass network is enabled and must never replace the production 443 owner.',
+    '- TCP 18090 is a loopback diagnostic/legacy listener by default. Existing deployments may keep a trusted-network compatibility bind during migration, but new launchers never send passwords, bearer tokens, or lease capabilities over it.',
+    '',
+    'Commands:',
+    '- `./manage.sh up` starts the default edge relay.',
+    '- `./manage.sh up-dns` also starts the optional CoreDNS profile on `${MX_DOMESTIC_DNS_BIND:-10.88.0.1}:${MX_DOMESTIC_DNS_PORT:-53}`.',
+    '- `./manage.sh up-public-gateway` persistently joins the official Compass network; nginx can then proxy to `mx-domestic-edge:8088`.',
+    '- `./manage.sh disable-public-gateway` removes that desired attachment and recreates only `domestic-edge`.',
+    '- `./manage.sh up-public-tls` is an explicit non-Compass fallback; do not run it on the production Compass host.',
+    '- `./manage.sh status` prints health, compose status, and configured upstreams.',
+    '- `./manage.sh health` checks both the Domestic edge and the Internal upstream bootstrap probe.',
+    '- `./manage.sh health-public` verifies the real public hostname and system-trusted certificate.',
+    '',
+    'Local Windows -> Domestic -> Mac Internal shadow test:',
+    '1. Ensure the Mac Internal host has the Internal service peer/WG address, normally `10.88.88.88`.',
+    '2. On the Mac Internal dev host, run `bash scripts/manage.sh ops internal-local port-forward 18090 0.0.0.0`.',
+    '3. In Internal Config Center, keep `MX_INTERNAL_API_UPSTREAM=http://10.88.88.88:18090` and `MX_INTERNAL_H2I_UPSTREAM=http://10.88.88.88:18090` unless the Internal service IP differs.',
+    '4. If there is no Internal service peer yet but Domestic can reach the Mac LAN directly, temporarily point those two upstreams to `http://<Mac LAN IP>:18090`.',
+    '5. Restart the edge with `./manage.sh up`, then verify `curl -fsS http://127.0.0.1:${MX_DOMESTIC_EDGE_PORT:-18090}/bootstrap-healthz`.',
+    '',
+    'Production Ubuntu Internal should not rely on that port-forward. It should expose `10.88.88.88:18090` through the Internal service peer/host gateway and keep the k8s API Service private.',
+    ''
+  ].join('\n'));
+}
+
+function writeDomesticServicesCompose(staging) {
+  writeFileSync(join(staging, 'docker-compose.yml'), [
+    'name: mx-domestic-edge-stack',
+    '',
+    'services:',
+    '  domestic-edge:',
+    '    image: caddy:2.8.4-alpine',
+    '    container_name: mx-domestic-edge',
+    '    restart: unless-stopped',
+    '    environment:',
+    '      MX_SITE_ID: ${MX_SITE_ID:-domestic-main}',
+    '      MX_SITE_ROLE: ${MX_SITE_ROLE:-domestic}',
+    '      MX_INTERNAL_BASE_URL: ${MX_INTERNAL_BASE_URL:-http://10.88.88.88:18090}',
+    '      MX_INTERNAL_API_UPSTREAM: ${MX_INTERNAL_API_UPSTREAM:-http://10.88.88.88:18090}',
+    '      MX_INTERNAL_H2I_UPSTREAM: ${MX_INTERNAL_H2I_UPSTREAM:-http://10.88.88.88:18090}',
+    '      MX_DOMESTIC_BOOTSTRAP_HOST: ${MX_DOMESTIC_BOOTSTRAP_HOST:-h2i.minsight-ai.com}',
+    '    ports:',
+    '      - "${MX_DOMESTIC_EDGE_BIND:-127.0.0.1}:${MX_DOMESTIC_EDGE_PORT:-18090}:8088/tcp"',
+    '    volumes:',
+    '      - ./Caddyfile:/etc/caddy/Caddyfile:ro',
+    '      - ./data/evidence:/srv/mx/evidence:ro',
+    '      - ./data/snapshots:/srv/mx/snapshots:ro',
+    '      - ./data/caddy:/data',
+    '      - ./config/caddy:/config',
+    '    healthcheck:',
+    '      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8088/healthz >/dev/null"]',
+    '      interval: 30s',
+    '      timeout: 5s',
+    '      retries: 3',
+    '    networks:',
+    '      - domestic_edge',
+    '',
+    '  public-tls:',
+    '    profiles:',
+    '      - public-tls',
+    '    image: caddy:2.8.4-alpine',
+    '    container_name: mx-domestic-public-tls',
+    '    restart: unless-stopped',
+    '    environment:',
+    '      MX_DOMESTIC_BOOTSTRAP_HOST: ${MX_DOMESTIC_BOOTSTRAP_HOST:-h2i.minsight-ai.com}',
+    '    ports:',
+    '      - "${MX_DOMESTIC_HTTPS_BIND:-0.0.0.0}:${MX_DOMESTIC_HTTPS_PORT:-443}:443/tcp"',
+    '    volumes:',
+    '      - ./Caddyfile.public-tls:/etc/caddy/Caddyfile:ro',
+    '      - ./data/caddy-public-tls:/data',
+    '      - ./config/caddy-public-tls:/config',
+    '    depends_on:',
+    '      domestic-edge:',
+    '        condition: service_healthy',
+    '    networks:',
+    '      - domestic_edge',
+    '',
+    '  dns-forwarder:',
+    '    profiles:',
+    '      - dns',
+    '    image: coredns/coredns:1.11.3',
+    '    container_name: mx-domestic-dns-forwarder',
+    '    restart: unless-stopped',
+    '    command: ["-conf", "/etc/coredns/Corefile"]',
+    '    ports:',
+    '      - "${MX_DOMESTIC_DNS_BIND:-10.88.0.1}:${MX_DOMESTIC_DNS_PORT:-53}:53/udp"',
+    '      - "${MX_DOMESTIC_DNS_BIND:-10.88.0.1}:${MX_DOMESTIC_DNS_PORT:-53}:53/tcp"',
+    '    volumes:',
+    '      - ./Corefile:/etc/coredns/Corefile:ro',
+    '    networks:',
+    '      - domestic_edge',
+    '',
+    'networks:',
+    '  domestic_edge:',
+    '    driver: bridge',
+    ''
+  ].join('\n'));
+}
+
+function writeDomesticPublicGatewayCompose(staging) {
+  writeFileSync(join(staging, 'docker-compose.public-gateway.yml'), [
+    'services:',
+    '  domestic-edge:',
+    '    networks:',
+    '      public_gateway:',
+    '        aliases:',
+    '          - mx-domestic-edge',
+    '',
+    'networks:',
+    '  public_gateway:',
+    '    external: true',
+    '    name: ${MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK:-compass-gateway_default}',
+    ''
+  ].join('\n'));
+}
+
+function writeDomesticServicesCaddyfile(staging) {
+  writeFileSync(join(staging, 'Caddyfile'), [
+    '{',
+    '  auto_https off',
+    '}',
+    '',
+    ':8088 {',
+    '  encode gzip',
+    '  header {',
+    '    X-MX-Site-Role domestic',
+    '    X-MX-Domestic-Mode bootstrap-and-relay',
+    '  }',
+    '',
+    '  @health {',
+    '    method GET',
+    '    path /healthz',
+    '  }',
+    '  respond @health "{\\"ok\\":true,\\"service\\":\\"mx-domestic-edge\\",\\"role\\":\\"domestic\\",\\"mode\\":\\"bootstrap-and-relay\\"}" 200',
+    '',
+    '  @bootstrapHealth {',
+    '    method GET',
+    '    path /bootstrap-healthz /internal-healthz',
+    '  }',
+    '  handle @bootstrapHealth {',
+    '    rewrite * /healthz',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-Forwarded-For {http.request.header.X-Forwarded-For}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  handle_path /evidence/* {',
+    '    root * /srv/mx/evidence',
+    '    file_server browse',
+    '  }',
+    '',
+    '  handle_path /snapshots/* {',
+    '    root * /srv/mx/snapshots',
+    '    file_server browse',
+    '  }',
+    '',
+    '  @mincaveSession {',
+    '    method POST',
+    '    path /internal/v1/mincave/session',
+    '  }',
+    '  handle @mincaveSession {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '  @mincaveDevices {',
+    '    method GET',
+    '    path /internal/v1/mincave/devices',
+    '  }',
+    '  handle @mincaveDevices {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '  @mincaveMembers {',
+    '    method GET',
+    '    path /internal/v1/mincave/members',
+    '  }',
+    '  handle @mincaveMembers {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '  @mincaveWorkspaceUpdate {',
+    '    method PATCH',
+    '    path /internal/v1/mincave/workspace',
+    '  }',
+    '  handle @mincaveWorkspaceUpdate {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '  @mincaveMemberUpdate {',
+    '    method PATCH',
+    '    path_regexp mincaveMemberUpdate ^/internal/v1/mincave/members/[A-Za-z0-9._-]+$',
+    '  }',
+    '  handle @mincaveMemberUpdate {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  @publicFeishuConfig {',
+    '    method GET',
+    '    path /internal/v1/sdk/oauth/feishu/config',
+    '  }',
+    '  handle @publicFeishuConfig {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-Forwarded-For {http.request.header.X-Forwarded-For}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  @publicLauncherProduct {',
+    '    method GET',
+    '    path_regexp launcherProduct ^/internal/v1/launcher-network/products/[A-Za-z0-9._-]+$',
+    '  }',
+    '  handle @publicLauncherProduct {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-Forwarded-For {http.request.header.X-Forwarded-For}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  # Aggregated multi-node subscription for third-party clients (Clash). The path',
+    '  # segment is a revocable, per-user token scoped to reading only that',
+    '  # subscription; the Bearer-guarded user-center URL stays off the public edge.',
+    '  @publicOverseaAggregate {',
+    '    method GET',
+    '    path_regexp overseaAggregate ^/internal/v1/oversea-subscriptions/mx-v1-[A-Za-z0-9_-]+\\.yaml$',
+    '  }',
+    '  handle @publicOverseaAggregate {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-Forwarded-For {http.request.header.X-Forwarded-For}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  # Per-account single-node subscription; the URL itself is the credential.',
+    '  @publicOverseaSubscription {',
+    '    method GET',
+    '    path_regexp overseaSubscription ^/internal/v1/site-slots/[A-Za-z0-9._-]+/subscriptions/hysteria2/[A-Za-z0-9._-]+\\.yaml$',
+    '  }',
+    '  handle @publicOverseaSubscription {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-Forwarded-For {http.request.header.X-Forwarded-For}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  @publicClientPost {',
+    '    method POST',
+    '    path /internal/v1/sdk/oauth/token /internal/v1/sdk/oauth/feishu/authorize /internal/v1/sdk/oauth/feishu/token /internal/v1/launcher-network/enrollments /internal/v1/launcher-network/snapshots',
+    '  }',
+    '  handle @publicClientPost {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-Forwarded-For {http.request.header.X-Forwarded-For}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  @publicLeaseOperation {',
+    '    method POST',
+    '    path_regexp launcherLeaseOperation ^/internal/v1/launcher-network/leases/[A-Za-z0-9._-]+/(release|domestic-peer/sync|internal-direct-peer/sync|domestic-relay/diagnostics)$',
+    '  }',
+    '  handle @publicLeaseOperation {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-Forwarded-For {http.request.header.X-Forwarded-For}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  @blockedControlPlane path /internal /internal/* /api /api/* /h2i /h2i/*',
+    '  respond @blockedControlPlane "forbidden\\n" 403',
+    '',
+    '  respond "mx-domestic-edge\\n" 200',
+    '}',
+    ''
+  ].join('\n'));
+}
+
+function writeDomesticPublicTlsCaddyfile(staging) {
+  writeFileSync(join(staging, 'Caddyfile.public-tls'), [
+    '{',
+    '  admin off',
+    '}',
+    '',
+    '{$MX_DOMESTIC_BOOTSTRAP_HOST:h2i.minsight-ai.com} {',
+    '  tls {',
+    '    issuer acme {',
+    '      disable_http_challenge',
+    '    }',
+    '  }',
+    '',
+    '  @publicHealth {',
+    '    method GET',
+    '    path /healthz /bootstrap-healthz /internal-healthz',
+    '  }',
+    '  handle @publicHealth {',
+    '    reverse_proxy domestic-edge:8088 {',
+    '      header_up X-Forwarded-For {remote_host}',
+    '    }',
+    '  }',
+    '',
+    '  @mincaveSession {',
+    '    method POST',
+    '    path /internal/v1/mincave/session',
+    '  }',
+    '  handle @mincaveSession {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '  @mincaveDevices {',
+    '    method GET',
+    '    path /internal/v1/mincave/devices',
+    '  }',
+    '  handle @mincaveDevices {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '  @mincaveMembers {',
+    '    method GET',
+    '    path /internal/v1/mincave/members',
+    '  }',
+    '  handle @mincaveMembers {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '  @mincaveWorkspaceUpdate {',
+    '    method PATCH',
+    '    path /internal/v1/mincave/workspace',
+    '  }',
+    '  handle @mincaveWorkspaceUpdate {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '  @mincaveMemberUpdate {',
+    '    method PATCH',
+    '    path_regexp mincaveMemberUpdate ^/internal/v1/mincave/members/[A-Za-z0-9._-]+$',
+    '  }',
+    '  handle @mincaveMemberUpdate {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  @publicFeishuConfig {',
+    '    method GET',
+    '    path /internal/v1/sdk/oauth/feishu/config',
+    '  }',
+    '  handle @publicFeishuConfig {',
+    '    reverse_proxy domestic-edge:8088 {',
+    '      header_up X-Forwarded-For {remote_host}',
+    '    }',
+    '  }',
+    '',
+    '  @publicLauncherProduct {',
+    '    method GET',
+    '    path_regexp launcherProduct ^/internal/v1/launcher-network/products/[A-Za-z0-9._-]+$',
+    '  }',
+    '  handle @publicLauncherProduct {',
+    '    reverse_proxy domestic-edge:8088 {',
+    '      header_up X-Forwarded-For {remote_host}',
+    '    }',
+    '  }',
+    '',
+    '  # Aggregated multi-node subscription for third-party clients (Clash). The path',
+    '  # segment is a revocable, per-user token scoped to reading only that',
+    '  # subscription; the Bearer-guarded user-center URL stays off the public edge.',
+    '  @publicOverseaAggregate {',
+    '    method GET',
+    '    path_regexp overseaAggregate ^/internal/v1/oversea-subscriptions/mx-v1-[A-Za-z0-9_-]+\\.yaml$',
+    '  }',
+    '  handle @publicOverseaAggregate {',
+    '    reverse_proxy domestic-edge:8088 {',
+    '      header_up X-Forwarded-For {remote_host}',
+    '    }',
+    '  }',
+    '',
+    '  # Per-account single-node subscription; the URL itself is the credential.',
+    '  @publicOverseaSubscription {',
+    '    method GET',
+    '    path_regexp overseaSubscription ^/internal/v1/site-slots/[A-Za-z0-9._-]+/subscriptions/hysteria2/[A-Za-z0-9._-]+\\.yaml$',
+    '  }',
+    '  handle @publicOverseaSubscription {',
+    '    reverse_proxy domestic-edge:8088 {',
+    '      header_up X-Forwarded-For {remote_host}',
+    '    }',
+    '  }',
+    '',
+    '  @publicClientPost {',
+    '    method POST',
+    '    path /internal/v1/sdk/oauth/token /internal/v1/sdk/oauth/feishu/authorize /internal/v1/sdk/oauth/feishu/token /internal/v1/launcher-network/enrollments /internal/v1/launcher-network/snapshots',
+    '  }',
+    '  handle @publicClientPost {',
+    '    reverse_proxy domestic-edge:8088 {',
+    '      header_up X-Forwarded-For {remote_host}',
+    '    }',
+    '  }',
+    '',
+    '  @publicLeaseOperation {',
+    '    method POST',
+    '    path_regexp launcherLeaseOperation ^/internal/v1/launcher-network/leases/[A-Za-z0-9._-]+/(release|domestic-peer/sync|internal-direct-peer/sync|domestic-relay/diagnostics)$',
+    '  }',
+    '  handle @publicLeaseOperation {',
+    '    reverse_proxy domestic-edge:8088 {',
+    '      header_up X-Forwarded-For {remote_host}',
+    '    }',
+    '  }',
+    '',
+    '  respond "not found\\n" 404',
+    '}',
+    ''
+  ].join('\n'));
+}
+
+function writeDomesticServicesCorefile(staging) {
+  writeFileSync(join(staging, 'Corefile'), [
+    '.:53 {',
+    '  errors',
+    '  health :8080',
+    '  ready :8181',
+    '  cache 30',
+    '  forward . 10.88.88.88:53',
+    '  reload',
+    '}',
+    ''
+  ].join('\n'));
+}
+
+function writeDomesticServicesManage(staging) {
+  writeFileSync(join(staging, 'manage.sh'), [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    'STACK_DIR="$(cd "$(dirname "$0")" && pwd)"',
+    'PUBLIC_GATEWAY_OVERRIDE="$STACK_DIR/docker-compose.public-gateway.yml"',
+    'PUBLIC_GATEWAY_MARKER="$STACK_DIR/data/public-gateway-enabled"',
+    'COMPOSE_BIN=""',
+    '',
+    'usage() {',
+    '  cat <<\'EOF\'',
+    'Usage:',
+    '  ./manage.sh up|up-dns|up-public-gateway|disable-public-gateway|up-public-tls|down|restart|status|health|health-public|logs',
+    '',
+    'Commands:',
+    '  up       Start the default Domestic edge relay.',
+    '  up-dns   Start edge relay plus the optional CoreDNS forwarder profile.',
+    '  up-public-gateway',
+    '           Persistently join the official Compass nginx external network.',
+    '           nginx upstream: http://mx-domestic-edge:8088',
+    '  disable-public-gateway',
+    '           Remove the Compass network attachment from domestic-edge.',
+    '  up-public-tls',
+    '           Non-Compass recovery/dev fallback that owns TCP 443.',
+    '           It is blocked while the official Compass integration is enabled.',
+    '  down     Stop all Domestic edge services.',
+    '  restart  Restart the default edge relay.',
+    '  status   Show configuration and docker compose state.',
+    '  health   Query the local health endpoint.',
+    '  health-public',
+    '           Verify the configured public HTTPS endpoint and system-trusted certificate.',
+    '  logs     Follow docker compose logs.',
+    'EOF',
+    '}',
+    '',
+    'ensure_env_file() {',
+    '  if [ ! -f "$STACK_DIR/.env" ] && [ -f "$STACK_DIR/.env.example" ]; then',
+    '    cp "$STACK_DIR/.env.example" "$STACK_DIR/.env"',
+    '  fi',
+    '}',
+    '',
+    'load_env() {',
+    '  ensure_env_file',
+    '  if [ -f "$STACK_DIR/.env" ]; then',
+    '    set -a',
+    '    # shellcheck disable=SC1091',
+    '    . "$STACK_DIR/.env"',
+    '    set +a',
+    '  fi',
+    '}',
+    '',
+    'detect_compose() {',
+    '  if docker compose version >/dev/null 2>&1; then',
+    '    COMPOSE_BIN="docker compose"',
+    '  elif command -v docker-compose >/dev/null 2>&1; then',
+    '    COMPOSE_BIN="docker-compose"',
+    '  else',
+    '    echo "Error: docker compose is required" >&2',
+    '    exit 1',
+    '  fi',
+    '}',
+    '',
+    'compose() {',
+    '  (',
+    '    cd "$STACK_DIR"',
+    '    if [ -f "$PUBLIC_GATEWAY_MARKER" ]; then',
+    '      test -f "$PUBLIC_GATEWAY_OVERRIDE" || { echo "Error: persisted public gateway integration is missing $PUBLIC_GATEWAY_OVERRIDE" >&2; exit 1; }',
+    '      set -- -f docker-compose.yml -f docker-compose.public-gateway.yml "$@"',
+    '    fi',
+    '    if [ "$COMPOSE_BIN" = "docker compose" ]; then',
+    '      docker compose "$@"',
+    '    else',
+    '      docker-compose "$@"',
+    '    fi',
+    '  )',
+    '}',
+    '',
+    'compose_public_gateway() {',
+    '  (',
+    '    cd "$STACK_DIR"',
+    '    if [ "$COMPOSE_BIN" = "docker compose" ]; then',
+    '      docker compose -f docker-compose.yml -f docker-compose.public-gateway.yml "$@"',
+    '    else',
+    '      docker-compose -f docker-compose.yml -f docker-compose.public-gateway.yml "$@"',
+    '    fi',
+    '  )',
+    '}',
+    '',
+    'ensure_public_gateway_network() {',
+    '  local network="${MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK:-compass-gateway_default}"',
+    '  test -f "$PUBLIC_GATEWAY_OVERRIDE" || { echo "Error: $PUBLIC_GATEWAY_OVERRIDE is missing; install/sync the latest Domestic bundle" >&2; return 1; }',
+    '  docker network inspect "$network" >/dev/null 2>&1 || { echo "Error: official Compass network $network does not exist; start Compass before enabling this integration" >&2; return 1; }',
+    '}',
+    '',
+    'stop_public_tls_fallback() {',
+    '  COMPOSE_PROFILES=public-tls compose_public_gateway stop public-tls >/dev/null 2>&1 || true',
+    '}',
+    '',
+    '# A release push swaps the /opt/mx/current/<kind> symlink to a new directory,',
+    '# but the compose mount is written as ./Caddyfile, so the rendered config string',
+    '# never changes and `compose up -d` reports "Running" without recreating. The',
+    '# container therefore keeps the inode of the PREVIOUS release and silently serves',
+    '# the old config -- `restart` and `caddy reload` cannot fix it either, because',
+    '# neither re-resolves a bind mount. Recreate so that `up` actually means "live".',
+    '# Every other up-* subcommand here already force-recreates; plain up was the',
+    '# outlier. The cost is a few seconds of edge downtime; WireGuard is unaffected',
+    '# because the relay runs under host wg-quick, not in this container.',
+    'start_domestic_edge() {',
+    '  local network="${MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK:-compass-gateway_default}"',
+    '  if [ -f "$PUBLIC_GATEWAY_MARKER" ]; then',
+    '    stop_public_tls_fallback',
+    '    compose up -d --force-recreate "$@" domestic-edge',
+    '  elif [ -f "$PUBLIC_GATEWAY_OVERRIDE" ] && docker network inspect "$network" >/dev/null 2>&1; then',
+    '    stop_public_tls_fallback',
+    '    compose_public_gateway up -d --force-recreate "$@" domestic-edge',
+    '    touch "$PUBLIC_GATEWAY_MARKER"',
+    '    echo "Auto-enabled official Compass upstream: http://mx-domestic-edge:8088"',
+    '  else',
+    '    compose up -d --force-recreate "$@" domestic-edge',
+    '  fi',
+    '}',
+    '',
+    'ensure_dirs() {',
+    '  mkdir -p "$STACK_DIR/data/evidence" "$STACK_DIR/data/snapshots" "$STACK_DIR/data/caddy" "$STACK_DIR/config/caddy" "$STACK_DIR/data/caddy-public-tls" "$STACK_DIR/config/caddy-public-tls"',
+    '}',
+    '',
+    'status_command() {',
+    '  echo "MX Domestic edge stack"',
+    '  echo "Stack directory: $STACK_DIR"',
+    '  echo "Site ID: ${MX_SITE_ID:-domestic-main}"',
+    '  echo "Diagnostic URL: http://${MX_DOMESTIC_EDGE_BIND:-127.0.0.1}:${MX_DOMESTIC_EDGE_PORT:-18090}"',
+    '  echo "Public bootstrap URL: https://${MX_DOMESTIC_BOOTSTRAP_HOST:-h2i.minsight-ai.com}"',
+    '  if [ -f "$PUBLIC_GATEWAY_MARKER" ]; then',
+    '    echo "Public gateway: enabled (${MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK:-compass-gateway_default} -> mx-domestic-edge:8088)"',
+    '  else',
+    '    echo "Public gateway: disabled (run ./manage.sh up-public-gateway after Compass is ready)"',
+    '  fi',
+    '  echo "Internal API upstream: ${MX_INTERNAL_API_UPSTREAM:-http://10.88.88.88:18090}"',
+    '  echo "Internal H2I upstream: ${MX_INTERNAL_H2I_UPSTREAM:-http://10.88.88.88:18090}"',
+    '  echo "DNS profile bind: ${MX_DOMESTIC_DNS_BIND:-10.88.0.1}:${MX_DOMESTIC_DNS_PORT:-53}"',
+    '  echo',
+    '  compose ps',
+    '}',
+    '',
+    'health_command() {',
+    '  local port="${MX_DOMESTIC_EDGE_PORT:-18090}"',
+    '  echo "Domestic edge health:"',
+    '  if command -v curl >/dev/null 2>&1; then',
+    '    curl -fsS "http://127.0.0.1:${port}/healthz"',
+    '    echo',
+    '    echo "Internal bootstrap upstream health:"',
+    '    curl -fsS "http://127.0.0.1:${port}/bootstrap-healthz"',
+    '  elif command -v wget >/dev/null 2>&1; then',
+    '    wget -qO- "http://127.0.0.1:${port}/healthz"',
+    '    echo',
+    '    echo "Internal bootstrap upstream health:"',
+    '    wget -qO- "http://127.0.0.1:${port}/bootstrap-healthz"',
+    '  else',
+    '    echo "health URL: http://127.0.0.1:${port}/healthz"',
+    '    echo "bootstrap upstream health URL: http://127.0.0.1:${port}/bootstrap-healthz"',
+    '  fi',
+    '  echo',
+    '}',
+    '',
+    'public_health_command() {',
+    '  local host="${MX_DOMESTIC_BOOTSTRAP_HOST:-h2i.minsight-ai.com}"',
+    '  local port="${MX_DOMESTIC_HTTPS_PORT:-443}"',
+    '  local authority="$host"',
+    '  if [ "$port" != "443" ]; then authority="$host:$port"; fi',
+    '  command -v curl >/dev/null 2>&1 || { echo "Error: curl is required for public TLS verification" >&2; return 127; }',
+    '  curl -fsS --connect-timeout 5 --max-time 20 "https://${authority}/bootstrap-healthz"',
+    '  echo',
+    '}',
+    '',
+    'cmd="${1:-status}"',
+    'load_env',
+    'case "$cmd" in',
+    '  help|-h|--help) usage ;;',
+    '  up)',
+    '    detect_compose',
+    '    ensure_dirs',
+    '    start_domestic_edge',
+    '    status_command',
+    '    ;;',
+    '  up-dns)',
+    '    detect_compose',
+    '    ensure_dirs',
+    '    start_domestic_edge',
+    '    COMPOSE_PROFILES=dns compose up -d --force-recreate --no-deps dns-forwarder',
+    '    status_command',
+    '    ;;',
+    '  up-public-gateway|up-compass)',
+    '    detect_compose',
+    '    ensure_dirs',
+    '    ensure_public_gateway_network',
+    '    stop_public_tls_fallback',
+    '    compose_public_gateway up -d --force-recreate domestic-edge',
+    '    touch "$PUBLIC_GATEWAY_MARKER"',
+    '    echo "Enabled official Compass upstream: http://mx-domestic-edge:8088"',
+    '    status_command',
+    '    ;;',
+    '  disable-public-gateway)',
+    '    detect_compose',
+    '    ensure_dirs',
+    '    rm -f "$PUBLIC_GATEWAY_MARKER"',
+    '    compose up -d --force-recreate domestic-edge',
+    '    echo "Disabled official Compass network attachment."',
+    '    status_command',
+    '    ;;',
+    '  up-public-tls)',
+    '    detect_compose',
+    '    ensure_dirs',
+    '    test ! -f "$PUBLIC_GATEWAY_MARKER" || { echo "Error: official Compass public gateway is enabled; public-tls must not compete for TCP 443" >&2; exit 1; }',
+    '    echo "Starting the non-Compass recovery/dev TLS owner on ${MX_DOMESTIC_HTTPS_BIND:-0.0.0.0}:${MX_DOMESTIC_HTTPS_PORT:-443}."',
+    '    echo "This command will fail closed if another nginx/Caddy/SLB process already owns that port."',
+    '    COMPOSE_PROFILES=public-tls compose up -d --force-recreate public-tls',
+    '    status_command',
+    '    ;;',
+    '  down)',
+    '    detect_compose',
+    '    compose down',
+    '    ;;',
+    '  restart)',
+    '    detect_compose',
+    '    ensure_dirs',
+    '    start_domestic_edge --force-recreate',
+    '    status_command',
+    '    ;;',
+    '  status)',
+    '    detect_compose',
+    '    status_command',
+    '    ;;',
+    '  health) health_command ;;',
+    '  health-public) public_health_command ;;',
+    '  logs)',
+    '    detect_compose',
+    '    compose logs -f --tail=100',
+    '    ;;',
+    '  *)',
+    '    usage >&2',
+    '    exit 64',
+    '    ;;',
+    'esac',
+    ''
+  ].join('\n'));
+}
+
+function createPlaceholderServicesTar({ artifactRoot, kind, artifactName, targetPath, enabledModules }) {
+  return createTarModule({
+    artifactRoot,
+    moduleId: `${kind}-services`,
+    artifactName,
+    targetPath,
+    status: 'placeholder',
+    notes: ['Shadow service bundle keeps the artifact contract stable until concrete site-agent/forwarder services land.'],
+    buildStaging: (staging) => {
+      writeFileSync(join(staging, 'README.md'), [
+        `# MX ${kind} Services Placeholder`,
+        '',
+        'This artifact is intentionally module-scoped and does not contain the repository root.',
+        'Replace this placeholder with concrete service code before production deployment.',
+        ''
+      ].join('\n'));
+      writeFileSync(join(staging, 'docker-compose.yml'), [
+        'name: mx-site-slot-placeholder',
+        'services: {}',
+        ''
+      ].join('\n'));
+      writeFileSync(join(staging, 'enabled-modules.json'), JSON.stringify({
+        kind,
+        enabledModules,
+        placeholder: true
+      }, null, 2));
+    }
+  });
+}
+
+function createTarModule({ artifactRoot, moduleId, artifactName, targetPath, status, metadata = {}, notes, rootOwnedArchive = false, buildStaging }) {
+  const staging = join(artifactRoot, '.staging', moduleId);
+  rmSync(staging, { recursive: true, force: true });
+  mkdirSync(staging, { recursive: true });
+  buildStaging(staging);
+
+  const artifactPath = join(artifactRoot, artifactName);
+  execFileSync('tar', [
+    '-czf',
+    artifactPath,
+    ...(rootOwnedArchive ? rootOwnedTarArgs() : []),
+    '-C',
+    staging,
+    '.'
+  ], {
+    env: { ...process.env, LC_ALL: 'C', LANG: 'C' }
+  });
+  const files = listRelativeFiles(staging);
+  return {
+    moduleId,
+    status,
+    artifact: relative(mxRoot, artifactPath),
+    artifactPath,
+    sha256: sha256File(artifactPath),
+    bytes: statSync(artifactPath).size,
+    targetPath,
+    metadata,
+    sourcePaths: files.map((file) => `${moduleId}:${file}`),
+    files,
+    notes
+  };
+}
+
+function rootOwnedTarArgs() {
+  const version = execFileSync('tar', ['--version'], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C', LANG: 'C' }
+  });
+  if (/bsdtar/i.test(version)) {
+    return ['--uid', '0', '--gid', '0', '--uname', 'root', '--gname', 'root'];
+  }
+  if (/GNU tar/i.test(version)) return ['--owner=0', '--group=0'];
+  die(`Unsupported tar implementation for root-owned qp-tunnel-cli archive: ${version.trim()}`);
+}
+
+function writeManifest(kindValue, artifactRoot, modules) {
+  rmSync(join(artifactRoot, '.staging'), { recursive: true, force: true });
+  const manifest = {
+    manifestVersion: 'site-slot-artifacts-v1',
+    kind: kindValue,
+    releaseRevision,
+    generatedAt: new Date().toISOString(),
+    artifactRoot,
+    artifactRootRelative: relative(mxRoot, artifactRoot),
+    policy: {
+      packaging: 'module-scoped',
+      transport: 'rsync-over-openssh-with-scp-fallback',
+      excluded: ['.git', 'docs', 'tests', 'local fixtures', 'node_modules', 'unrelated workspace packages'],
+      repositoryRootSynced: false
+    },
+    modules
+  };
+  const manifestPath = join(artifactRoot, 'manifest.json');
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  manifest.manifestPath = manifestPath;
+  manifest.manifestSha256 = sha256File(manifestPath);
+  writeFileSync(`${manifestPath}.sha256`, `${manifest.manifestSha256}  manifest.json\n`);
+  return manifest;
+}
+
+function resetArtifactRoot(kindValue) {
+  const root = join(outputBase, kindValue);
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(root, { recursive: true });
+  return root;
+}
+
+function readExistingArtifactModules(kindValue) {
+  const root = join(outputBase, kindValue);
+  const manifestPath = join(root, 'manifest.json');
+  const modules = new Map();
+  if (!existsSync(manifestPath)) return modules;
+  let manifest = null;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch {
+    return modules;
+  }
+  for (const module of Array.isArray(manifest.modules) ? manifest.modules : []) {
+    const moduleId = typeof module.moduleId === 'string' ? module.moduleId : null;
+    if (!moduleId) continue;
+    const artifactPath = existingArtifactPath(root, module);
+    if (!artifactPath) continue;
+    modules.set(moduleId, {
+      moduleId,
+      artifactName: basename(artifactPath),
+      bytes: readFileSync(artifactPath),
+      status: typeof module.status === 'string' ? module.status : 'ready',
+      targetPath: typeof module.targetPath === 'string' ? module.targetPath : null,
+      metadata: module.metadata && typeof module.metadata === 'object' ? module.metadata : {},
+      sourcePaths: Array.isArray(module.sourcePaths) ? module.sourcePaths.filter((item) => typeof item === 'string') : [],
+      files: Array.isArray(module.files) ? module.files.filter((item) => typeof item === 'string') : [],
+      notes: Array.isArray(module.notes) ? module.notes.filter((item) => typeof item === 'string') : []
+    });
+  }
+  return modules;
+}
+
+function existingArtifactPath(root, module) {
+  const names = [
+    typeof module.artifactPath === 'string' ? basename(module.artifactPath) : null,
+    typeof module.artifact === 'string' ? basename(module.artifact) : null
+  ].filter(Boolean);
+  for (const name of names) {
+    const candidate = join(root, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  const candidates = [
+    typeof module.artifactPath === 'string' ? module.artifactPath : null,
+    typeof module.artifact === 'string' ? resolve(mxRoot, module.artifact) : null
+  ].filter(Boolean);
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
+
+function restoreExistingTarModule(artifactRoot, previous, fallbackArtifactName) {
+  if (!previous?.bytes) return null;
+  const artifactName = previous.artifactName || fallbackArtifactName;
+  const artifactPath = join(artifactRoot, artifactName);
+  writeFileSync(artifactPath, previous.bytes);
+  return {
+    moduleId: previous.moduleId,
+    status: previous.status,
+    artifact: relative(mxRoot, artifactPath),
+    artifactPath,
+    sha256: sha256File(artifactPath),
+    bytes: statSync(artifactPath).size,
+    targetPath: previous.targetPath,
+    metadata: previous.metadata,
+    sourcePaths: previous.sourcePaths,
+    files: previous.files,
+    notes: previous.notes.length
+      ? previous.notes
+      : ['Reused previously materialized tarball because the runtime image does not carry source package inputs.']
+  };
+}
+
+function copyRequired(sourceRoot, targetRoot, files) {
+  for (const file of files) {
+    const source = join(sourceRoot, file);
+    const target = join(targetRoot, file);
+    if (!existsSync(source)) die(`Missing required artifact source: ${source}`);
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(source, target, { recursive: true });
+  }
+}
+
+function copyOptional(sourceRoot, targetRoot, files) {
+  for (const file of files) {
+    const source = join(sourceRoot, file);
+    if (!existsSync(source)) continue;
+    const target = join(targetRoot, file);
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(source, target, { recursive: true });
+  }
+}
+
+function chmodIfExists(path, mode) {
+  if (existsSync(path)) chmodSync(path, mode);
+}
+
+function listRelativeFiles(root) {
+  const out = [];
+  visit(root);
+  return out.sort();
+
+  function visit(dir) {
+    const entries = execFileSync('find', [dir, '-type', 'f'], { encoding: 'utf8' })
+      .split('\n')
+      .filter(Boolean);
+    for (const entry of entries) out.push(relative(root, entry));
+  }
+}
+
+function sha256File(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function optionValue(name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : null;
+}
+
+function envValue(name) {
+  const value = process.env[name]?.trim();
+  return value || null;
+}
+
+function envBool(name, defaultValue = false) {
+  const value = envValue(name)?.toLowerCase();
+  if (!value) return defaultValue;
+  if (value === '0' || value === 'false' || value === 'no' || value === 'off' || value === 'disabled') return false;
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on' || value === 'enabled';
+}
+
+function parseCsv(value) {
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function resolveMxRoot(baseDir) {
+  const candidates = [
+    process.env.MX_LAUNCHER_ROOT,
+    resolve(baseDir, '../..'),
+    resolve(baseDir, '..'),
+    process.cwd()
+  ].filter(Boolean);
+  return candidates.find((candidate) => existsSync(join(candidate, 'site-slots')) && existsSync(join(candidate, 'server/package.json')))
+    ?? candidates.find((candidate) => existsSync(join(candidate, 'artifacts/site-slots')))
+    ?? candidates.find((candidate) => existsSync(join(candidate, 'package.json')) && existsSync(join(candidate, 'scripts')))
+    ?? resolve(baseDir, '../..');
+}
+
+function gitRevision() {
+  try {
+    return execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], {
+      cwd: mxRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function timestampRevision() {
+  return new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+}
+
+function die(message) {
+  console.error(message);
+  process.exit(1);
+}

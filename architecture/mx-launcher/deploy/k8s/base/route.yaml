@@ -1,0 +1,40 @@
+# 都只挂 Gateway internal：只对内网和 H2I 用户开放（docs/18）。
+#
+# 1. Launcher API：H2I 客户端访问 http://<service peer>:18090，办公网 http://<LAN>:18090。
+#    host-nginx 在 :18090 上把 Host 换成 launcher.ladder2.internal（Gateway API 的 hostnames 不能写 IP），
+#    原来的 Host 放进 X-Forwarded-Host，再转给 Gateway internal（infra/nginx/s2/ladder2.conf.tmpl）。
+#    直接到 Launcher，不再经过应用网关（docs/47：L1 的 Caddy 这一跳由 Gateway internal 的 nginx 接手）。
+#    Launcher 按 MX_HTTP_TRUST_PROXY_CIDRS 从 X-Forwarded-For 认客户端。
+#
+# 2. Launcher 发布的内网应用：域名是 Launcher 运行时写进应用网关配置的，这里不写 hostnames，
+#    当 Gateway internal 的兜底路由。别的路由写了 hostnames 的优先匹配，不受影响。
+#    只有 H2I 客户端的来源会被 host-nginx 转进来（docs/47，docs/15 第 74 项）。
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mx-launcher-api
+  labels: { app.kubernetes.io/name: mx-launcher-internal, app.kubernetes.io/part-of: mx-3ks }
+spec:
+  parentRefs:
+    - name: internal
+      namespace: gateway
+  hostnames:
+    - launcher.ladder2.internal
+  rules:
+    - backendRefs:
+        - name: mx-launcher-internal
+          port: 18090
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mx-launcher-apps
+  labels: { app.kubernetes.io/name: mx-internal-gateway, app.kubernetes.io/part-of: mx-3ks }
+spec:
+  parentRefs:
+    - name: internal
+      namespace: gateway
+  rules:
+    - backendRefs:
+        - name: mx-internal-gateway
+          port: 80

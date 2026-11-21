@@ -1,0 +1,310 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "边缘机器 · 从任意一台 Internal 经 SSH 推送",
+  "subtitle": "设计 + 本机容器实测（docs/37–44）；internal02 → domestic02 已在真机上通",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "output": "design/architecture/07-edge.html"
+ },
+ "layout": {
+  "mode": "grid",
+  "origin": [
+   40,
+   90
+  ],
+  "cols": 6,
+  "gapX": 56,
+  "gapY": 64,
+  "cellW": 168,
+  "cellH": 80
+ },
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "两台推送机",
+   "items": [
+    "各有名字和 edge home，互不覆盖",
+    "机器记着谁管哪个组件，换人要 --take-over",
+    "edge relations 列出推送机 → 机器 → 组件"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "配置目录和隧道",
+   "items": [
+    "/var/lib/qp-tunnel/edge/state/机器/组件",
+    "不进包、不进 Git；丢了用 state pull 拿回",
+    "edge link：domestic02 10.88.0.2 → s2 10.88.88.89（只路由 /32）"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "不动线上",
+   "items": [
+    "现在那台 domestic-main 有 v1 组件，整台不推",
+    "主机上不删；回退连 state 一起切回",
+    "hy2 镜像固定：v2.14.0、2.11.9-alpine"
+   ]
+  }
+ ],
+ "components": [
+  {
+   "id": "launcher",
+   "type": "backend",
+   "label": "Launcher",
+   "sublabel": "site-slot SSH 档案",
+   "row": 0,
+   "col": 0
+  },
+  {
+   "id": "home1",
+   "type": "database",
+   "label": "internal01 的 home",
+   "sublabel": "名字 · state/ · 台账",
+   "row": 0,
+   "col": 1
+  },
+  {
+   "id": "home2",
+   "type": "database",
+   "label": "internal02 的 home",
+   "sublabel": "名字 · state/ · 台账",
+   "row": 0,
+   "col": 2
+  },
+  {
+   "id": "stacks",
+   "type": "backend",
+   "label": "技术栈",
+   "sublabel": "wg / open / hy2 · 镜像固定",
+   "row": 0,
+   "col": 3
+  },
+  {
+   "id": "o1",
+   "type": "backend",
+   "label": "qp-tunnel-cli edge",
+   "sublabel": "internal01 · s1 · CentOS 8",
+   "row": 1,
+   "col": 1
+  },
+  {
+   "id": "o2",
+   "type": "backend",
+   "label": "qp-tunnel-cli edge",
+   "sublabel": "internal02 · s2 · Ubuntu",
+   "row": 1,
+   "col": 2
+  },
+  {
+   "id": "rel",
+   "type": "frontend",
+   "label": "edge relations",
+   "sublabel": "推送机 → 机器 → 组件",
+   "row": 1,
+   "col": 3
+  },
+  {
+   "id": "jump",
+   "type": "security",
+   "label": "跳板机",
+   "sublabel": "可选 · 可多级",
+   "row": 2,
+   "col": 1
+  },
+  {
+   "id": "pre",
+   "type": "security",
+   "label": "preflight",
+   "sublabel": "系统族 · 谁管 · 别的工具",
+   "row": 3,
+   "col": 0
+  },
+  {
+   "id": "relz",
+   "type": "database",
+   "label": "releases/组件/版本",
+   "sublabel": "不覆盖 · 带 .edge-state",
+   "row": 3,
+   "col": 1
+  },
+  {
+   "id": "cur",
+   "type": "backend",
+   "label": "current/组件",
+   "sublabel": "deploy.sh → health.sh",
+   "row": 3,
+   "col": 2
+  },
+  {
+   "id": "own",
+   "type": "database",
+   "label": ".edge-origin",
+   "sublabel": "谁管 · 换人要 --take-over",
+   "row": 3,
+   "col": 3
+  },
+  {
+   "id": "d1",
+   "type": "cloud",
+   "label": "domestic01",
+   "sublabel": "internal01 管",
+   "row": 4,
+   "col": 0
+  },
+  {
+   "id": "d2",
+   "type": "cloud",
+   "label": "domestic02",
+   "sublabel": "internal02 管 · wg-nginx",
+   "row": 4,
+   "col": 1
+  },
+  {
+   "id": "d3",
+   "type": "cloud",
+   "label": "domestic03",
+   "sublabel": "internal02 管 · internal03 同理",
+   "row": 4,
+   "col": 2
+  },
+  {
+   "id": "ov",
+   "type": "cloud",
+   "label": "Oversea",
+   "sublabel": "hy2-mihomo",
+   "row": 4,
+   "col": 3
+  },
+  {
+   "id": "s2hn",
+   "type": "backend",
+   "label": "s2 host-nginx",
+   "sublabel": "edge link 回源",
+   "row": 5,
+   "col": 1
+  }
+ ],
+ "connections": [
+  {
+   "from": "launcher",
+   "to": "o1",
+   "label": "edge import"
+  },
+  {
+   "from": "launcher",
+   "to": "o2",
+   "label": "edge import"
+  },
+  {
+   "from": "home1",
+   "to": "o1"
+  },
+  {
+   "from": "home2",
+   "to": "o2"
+  },
+  {
+   "from": "stacks",
+   "to": "o2",
+   "label": "--stack"
+  },
+  {
+   "from": "o2",
+   "to": "rel",
+   "label": "只读"
+  },
+  {
+   "from": "o1",
+   "to": "jump",
+   "label": "SSH 上传",
+   "variant": "emphasis"
+  },
+  {
+   "from": "o2",
+   "to": "jump",
+   "label": "SSH 上传",
+   "variant": "emphasis"
+  },
+  {
+   "from": "jump",
+   "to": "pre",
+   "label": "解包到 incoming",
+   "variant": "emphasis"
+  },
+  {
+   "from": "pre",
+   "to": "relz",
+   "label": "通过才写 state"
+  },
+  {
+   "from": "relz",
+   "to": "cur",
+   "label": "切链接"
+  },
+  {
+   "from": "cur",
+   "to": "own",
+   "label": "记下推送机"
+  },
+  {
+   "from": "cur",
+   "to": "d1"
+  },
+  {
+   "from": "cur",
+   "to": "d2"
+  },
+  {
+   "from": "cur",
+   "to": "d3"
+  },
+  {
+   "from": "cur",
+   "to": "ov"
+  },
+  {
+   "from": "d2",
+   "to": "s2hn",
+   "label": "只走 Domestic → Internal",
+   "variant": "emphasis"
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "region",
+   "label": "Internal · 每台都可以是推送机",
+   "wraps": [
+    "launcher",
+    "home1",
+    "home2",
+    "stacks",
+    "o1",
+    "o2",
+    "rel"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "每台边缘机器上 /opt/mx",
+   "wraps": [
+    "pre",
+    "relz",
+    "cur",
+    "own"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "推出去的机器 · 不进集群",
+   "wraps": [
+    "d1",
+    "d2",
+    "d3",
+    "ov"
+   ]
+  }
+ ]
+}

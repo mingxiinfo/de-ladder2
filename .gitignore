@@ -17,3 +17,10 @@ docs/atlas/*.delivery.json
 design/architecture/*.delivery*.json
 design/.build/
 design/architecture/*.delivery*.json
+# ladder1/ 是 L1 pro 分支的本地副本，不进本工程的 Git（用户 2026-11-21，docs/37）
+ladder1/
+# architecture/、projects/ 里迁过来的源码的构建产物（docs/46）
+architecture/*/server/dist/
+architecture/*/server/artifacts/
+__pycache__/
+*.tsbuildinfo

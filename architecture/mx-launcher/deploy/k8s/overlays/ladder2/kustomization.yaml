@@ -1,0 +1,15 @@
+# s2 上的 L2 集群（docs/46、docs/47）。部署：./scripts/manage.sh app deploy mx-launcher --context <名字>
+# 命名空间写在 base（mx-internal-shadow）和 dns（mx-dns）里，这里不再写。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ../../dns
+# 镜像只在这里写版本。改了 server/ 或 desktop/ 就把 newTag 加一（base/config.env 的 MX_INTERNAL_HOST_RUNNER_IMAGE 跟着改），
+# 再 image build、image import、app deploy。
+# localhost/ 开头：本机 containerd 里没有时不会去 Docker Hub 拉同名镜像，直接失败。
+# 有镜像仓库之后（docs/15 第 45 项）只改 newName。
+images:
+  - name: mx-launcher-server
+    newName: localhost/ladder2/mx-launcher-server
+    newTag: l2-2

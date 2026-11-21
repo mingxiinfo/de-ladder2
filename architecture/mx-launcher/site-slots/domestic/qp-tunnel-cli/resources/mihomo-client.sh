@@ -1,0 +1,2376 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# `qp-tunnel-cli` may run more than one Mihomo process on the same host.  The
+# default instance intentionally keeps every historical path and the 7788
+# listener.  A named instance is opt-in and receives a complete, deterministic
+# namespace so installing it cannot replace the default subscription or unit.
+MIHOMO_INSTANCE="${MIHOMO_INSTANCE:-}"
+MIHOMO_EXPLICIT_USE_ONLY="${MIHOMO_EXPLICIT_USE_ONLY:-false}"
+
+_mihomo_launcher_name="${0##*/}"
+if [[ -z "$MIHOMO_INSTANCE" && "$_mihomo_launcher_name" =~ ^mihomo-client-([a-z][a-z0-9-]{0,31})$ ]]; then
+	MIHOMO_INSTANCE="${BASH_REMATCH[1]}"
+fi
+MIHOMO_INSTANCE="${MIHOMO_INSTANCE:-default}"
+
+# Instance is a management option rather than part of a subscription or of a
+# command launched through `run`.  Remove it before the existing command parser
+# sees the remaining options.  Keeping `run` opaque avoids stealing an
+# application's own `--instance` argument.
+_mihomo_command="${1:-help}"
+if [[ "$_mihomo_command" == "--verbose" ]]; then
+	_mihomo_command="${2:-help}"
+fi
+case "$_mihomo_command" in
+	setup|install|update-subscription|start|stop|restart|status|logs|enable|disable|upgrade-systemd|reload|port|listen|server-on|server-off|egress-on|egress-off|proxy-on|proxy-off|tun-on|tun-off|ssh-proxy-on|ssh-proxy-off|daemon-proxy-on|daemon-proxy-off|docker-proxy-on|docker-proxy-off|docker-build-proxy|test|print-env|uninstall)
+		_mihomo_filtered_args=()
+		_mihomo_instance_arg=""
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+				--instance)
+					[[ $# -ge 2 && -n "${2:-}" ]] || { echo "Error: Missing value for --instance." >&2; exit 1; }
+					[[ -z "$_mihomo_instance_arg" ]] || { echo "Error: --instance may only be provided once." >&2; exit 1; }
+					_mihomo_instance_arg="$2"
+					shift 2
+				;;
+				--instance=*)
+					[[ -z "$_mihomo_instance_arg" ]] || { echo "Error: --instance may only be provided once." >&2; exit 1; }
+					_mihomo_instance_arg="${1#--instance=}"
+					[[ -n "$_mihomo_instance_arg" ]] || { echo "Error: Missing value for --instance." >&2; exit 1; }
+					shift
+				;;
+				*)
+					_mihomo_filtered_args+=("$1")
+					shift
+				;;
+			esac
+		done
+		if [[ -n "$_mihomo_instance_arg" ]]; then
+			MIHOMO_INSTANCE="$_mihomo_instance_arg"
+		fi
+		set -- "${_mihomo_filtered_args[@]}"
+	;;
+esac
+
+[[ "$MIHOMO_INSTANCE" == "default" || "$MIHOMO_INSTANCE" =~ ^[a-z][a-z0-9-]{0,31}$ ]] \
+	|| { echo "Error: Instance must be 'default' or match [a-z][a-z0-9-]{0,31}." >&2; exit 1; }
+
+if [[ "$MIHOMO_INSTANCE" != "default" ]]; then
+	MIHOMO_HOME="/etc/mihomo-client/instances/$MIHOMO_INSTANCE"
+	MIHOMO_ENV_FILE="$MIHOMO_HOME/client.env"
+	MIHOMO_SUBSCRIPTION_FILE="$MIHOMO_HOME/subscription.yaml"
+	MIHOMO_CONFIG_FILE="$MIHOMO_HOME/config.yaml"
+	MIHOMO_TUN_OVERLAY_FILE="$MIHOMO_HOME/tun-overlay.yaml"
+	MIHOMO_TUN_ROUTE_EXCLUDE_FILE="$MIHOMO_HOME/tun-route-exclude-addresses.txt"
+	MIHOMO_BIN="/usr/local/bin/mihomo-$MIHOMO_INSTANCE"
+	MIHOMO_CLIENT_LAUNCHER="/usr/local/bin/mihomo-client-$MIHOMO_INSTANCE"
+	MIHOMO_SERVICE_NAME="mihomo-client@$MIHOMO_INSTANCE.service"
+	MIHOMO_SERVICE_FILE="/etc/systemd/system/$MIHOMO_SERVICE_NAME"
+	MIHOMO_PROFILE_PROXY_FILE="/etc/profile.d/mihomo-client-$MIHOMO_INSTANCE-proxy.sh"
+	MIHOMO_DAEMON_PROXY_DROPIN_NAME="zzz-qp-tunnel-$MIHOMO_INSTANCE-daemon-proxy.conf"
+	MIHOMO_DOCKER_BUILD_PROXY_DROPIN="zzz-qp-tunnel-$MIHOMO_INSTANCE-docker-build-proxy.conf"
+	MIHOMO_SSH_PROXY_HELPER="/usr/local/bin/mihomo-$MIHOMO_INSTANCE-ssh-proxy"
+	MIHOMO_SSH_CONFIG_FILE="/etc/ssh/ssh_config.d/99-mihomo-client-$MIHOMO_INSTANCE-proxy.conf"
+fi
+
+# This reserved instance is a second local listener for applications that opt
+# in to 127.0.0.1:7890.  It must never become the host-wide proxy or TUN owner.
+if [[ "$MIHOMO_INSTANCE" == "subscriptions" ]]; then
+	MIHOMO_EXPLICIT_USE_ONLY="true"
+fi
+
+unset _mihomo_launcher_name _mihomo_command _mihomo_filtered_args _mihomo_instance_arg
+
+MIHOMO_VERBOSE="${MIHOMO_VERBOSE:-false}"
+
+MIHOMO_HOME="${MIHOMO_HOME:-/etc/mihomo-client}"
+MIHOMO_ENV_FILE="${MIHOMO_ENV_FILE:-$MIHOMO_HOME/client.env}"
+MIHOMO_SUBSCRIPTION_FILE="${MIHOMO_SUBSCRIPTION_FILE:-$MIHOMO_HOME/subscription.yaml}"
+MIHOMO_CONFIG_FILE="${MIHOMO_CONFIG_FILE:-$MIHOMO_HOME/config.yaml}"
+MIHOMO_TUN_OVERLAY_FILE="${MIHOMO_TUN_OVERLAY_FILE:-$MIHOMO_HOME/tun-overlay.yaml}"
+MIHOMO_BIN="${MIHOMO_BIN:-/usr/local/bin/mihomo}"
+MIHOMO_CLIENT_LAUNCHER="${MIHOMO_CLIENT_LAUNCHER:-/usr/local/bin/mihomo-client}"
+MIHOMO_SERVICE_NAME="${MIHOMO_SERVICE_NAME:-mihomo-client.service}"
+MIHOMO_SERVICE_FILE="${MIHOMO_SERVICE_FILE:-/etc/systemd/system/$MIHOMO_SERVICE_NAME}"
+MIHOMO_MIXED_PORT="${MIHOMO_MIXED_PORT:-7788}"
+MIHOMO_TUN_AUTO_ROUTE="${MIHOMO_TUN_AUTO_ROUTE:-true}"
+MIHOMO_TUN_AUTO_REDIRECT="${MIHOMO_TUN_AUTO_REDIRECT:-false}"
+MIHOMO_TUN_AUTO_DETECT_INTERFACE="${MIHOMO_TUN_AUTO_DETECT_INTERFACE:-true}"
+MIHOMO_TUN_STRICT_ROUTE="${MIHOMO_TUN_STRICT_ROUTE:-true}"
+MIHOMO_TUN_PRESERVE_SSH_CLIENT="${MIHOMO_TUN_PRESERVE_SSH_CLIENT:-true}"
+MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS="${MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS:-${MIHOMO_TUN_EXTRA_ROUTE_EXCLUDE_ADDRESS:-}}"
+MIHOMO_TUN_ROUTE_EXCLUDE_FILE="${MIHOMO_TUN_ROUTE_EXCLUDE_FILE:-$MIHOMO_HOME/tun-route-exclude-addresses.txt}"
+MIHOMO_PROFILE_PROXY_FILE="${MIHOMO_PROFILE_PROXY_FILE:-/etc/profile.d/mihomo-client-proxy.sh}"
+MIHOMO_DAEMON_PROXY_SERVICES="${MIHOMO_DAEMON_PROXY_SERVICES:-docker.service containerd.service buildkit.service}"
+# systemd applies drop-ins in filename order and the last assignment of a
+# variable wins, so this must sort after any pre-existing proxy drop-in
+# (http-proxy.conf, proxy.conf, ...). The former name `mihomo-proxy.conf` lost to
+# `proxy.conf`, which silently left daemons on the other proxy. Other people's
+# files are never edited: ours wins while present and disappears on off.
+MIHOMO_DAEMON_PROXY_DROPIN_DEFAULT="zzz-qp-tunnel-daemon-proxy.conf"
+MIHOMO_DAEMON_PROXY_DROPIN_NAME="${MIHOMO_DAEMON_PROXY_DROPIN_NAME:-$MIHOMO_DAEMON_PROXY_DROPIN_DEFAULT}"
+# This script also runs as other, deliberately namespaced instances (mx-launcher
+# drives one as mx-internal-egress through the MIHOMO_* overrides). An instance
+# must only ever touch its own paths, so the pre-rename name is reclaimed only
+# when running as the default instance. Never add another instance's file here.
+if [[ "$MIHOMO_DAEMON_PROXY_DROPIN_NAME" == "$MIHOMO_DAEMON_PROXY_DROPIN_DEFAULT" ]]; then
+	MIHOMO_DAEMON_PROXY_LEGACY_DROPIN_NAMES="mihomo-proxy.conf"
+else
+	MIHOMO_DAEMON_PROXY_LEGACY_DROPIN_NAMES=""
+fi
+# Written into generated files so the report can tell "another instance of this
+# script" apart from a hand-written proxy file.
+MIHOMO_GENERATED_MARKER="Generated by scripts/mihomo-client.sh"
+MIHOMO_NO_PROXY="${MIHOMO_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,169.254.169.254,169.254.169.254/32,100.64.0.0/10,100.88.0.0/16,100.89.0.0/16,100.90.0.0/16,10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16,100.100.100.200,100.100.100.200/32,host.docker.internal,docker.for.mac.host.internal,docker.for.win.localhost,kubernetes.docker.internal,kubernetes.default.svc,.cluster.local,.local,.lan,${MIHOMO_INTERNAL_DNS_ZONE:-.mxinfo-inc.cn}}"
+MIHOMO_SSH_PROXY_HELPER="${MIHOMO_SSH_PROXY_HELPER:-/usr/local/bin/mihomo-ssh-proxy}"
+MIHOMO_SSH_CONFIG_DIR="${MIHOMO_SSH_CONFIG_DIR:-/etc/ssh/ssh_config.d}"
+MIHOMO_SSH_CONFIG_FILE="${MIHOMO_SSH_CONFIG_FILE:-$MIHOMO_SSH_CONFIG_DIR/99-mihomo-proxy.conf}"
+MIHOMO_SSH_PROXY_HOSTS="${MIHOMO_SSH_PROXY_HOSTS:-github.com gitlab.com bitbucket.org ssh.dev.azure.com}"
+GITHUB_API_ROOT="${GITHUB_API_ROOT:-https://api.github.com/repos/MetaCubeX/mihomo/releases}"
+MIHOMO_GITHUB_CONNECT_TIMEOUT="${MIHOMO_GITHUB_CONNECT_TIMEOUT:-15}"
+MIHOMO_GITHUB_MAX_TIME="${MIHOMO_GITHUB_MAX_TIME:-90}"
+MIHOMO_NPM_ENGINE_FALLBACK="${MIHOMO_NPM_ENGINE_FALLBACK:-true}"
+MIHOMO_NPM_ENGINE_PACKAGE="${MIHOMO_NPM_ENGINE_PACKAGE:-}"
+MIHOMO_NPM_ENGINE_VERSION="${MIHOMO_NPM_ENGINE_VERSION:-latest}"
+MIHOMO_NPM_REGISTRY="${MIHOMO_NPM_REGISTRY:-}"
+MIHOMO_NPM_CACHE="${MIHOMO_NPM_CACHE:-}"
+MIHOMO_GEOX_GEOIP_URL="${MIHOMO_GEOX_GEOIP_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat}"
+MIHOMO_GEOX_GEOSITE_URL="${MIHOMO_GEOX_GEOSITE_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat}"
+MIHOMO_GEOX_MMDB_URL="${MIHOMO_GEOX_MMDB_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb}"
+
+usage() {
+	cat <<'EOF'
+Usage:
+  sudo bash ./scripts/mihomo-client.sh [--verbose] <command> [options]
+
+Commands:
+  setup                Interactive install wizard (same as install without flags)
+  install              Install Mihomo core, fetch remote subscription, create+enable service
+  update-subscription  Re-download remote YAML and restart service if it is running
+  start                Start Mihomo client service
+  stop                 Stop Mihomo client service
+  restart              Restart Mihomo client service
+  status               Show service status and current local proxy info
+  logs                 Show recent service logs
+  enable               Enable service on boot
+  disable              Disable service on boot
+  upgrade-systemd      Refresh the installed systemd unit from this script
+  listen on [PORT]     Point this host's proxy env (shell, ssh, daemons) at PORT, default this
+                       instance's own port. Does not restart the tunnel. PORT may be another
+                       proxy, e.g. `listen on 7890`
+  listen off           Withdraw that wiring; the tunnel keeps running for explicit use
+  listen status        Show the tunnel port, the published port and what is wired
+  reload               Re-apply everything after a package update: launcher, systemd unit,
+                       runtime config and the integrations that are currently enabled
+  port PORT            Change this instance's local mixed port and refresh what embeds it
+  server-on            Enable persistent server-safe outbound proxy mode, without TUN
+  server-off           Disable server-safe proxy integrations, keeping the service installed
+  egress-on            Preferred server-safe outbound proxy mode for Domestic bootstrap
+  egress-off           Disable server-safe outbound proxy integrations
+  proxy-on             Write /etc/profile.d proxy exports for login shells
+  proxy-off            Remove /etc/profile.d proxy exports
+  tun-on               Enable persistent Mihomo TUN mode with cn-direct and local/private route bypasses
+  tun-off              Disable Mihomo TUN mode and also turn proxy-on off
+  ssh-proxy-on         Configure OpenSSH client to use local Mihomo SOCKS for common Git hosts
+  ssh-proxy-off        Remove OpenSSH proxy override
+  daemon-proxy-on      Configure common daemon services to use local Mihomo proxy
+  daemon-proxy-off     Remove daemon proxy overrides
+  docker-proxy-on      Backward-compatible alias for daemon-proxy-on
+  docker-proxy-off     Backward-compatible alias for daemon-proxy-off
+  docker-build-proxy   Route docker image builds via the Mihomo proxy: 'on' proxies docker.service and disables registry-mirrors, 'off' restores. Usage: docker-build-proxy on|off
+  run                  Run one command with Mihomo proxy env injected
+  test                 Test outbound access through the local mixed-port
+  print-env            Print proxy env exports for the current local mixed-port
+  print-unset-env      Print unset lines to clear proxy vars from the current shell.
+                       Use: eval "$(qp-tunnel-cli print-unset-env)"
+  uninstall            Stop+disable service and optionally remove config/binary
+  help                 Show this help
+
+Instance option (management commands):
+  --instance NAME      Use an isolated named instance. `default` preserves the
+                       historical /etc/mihomo-client, mihomo-client.service and
+                       mixed-port 7788 paths. Named instances use separate state,
+                       binary, launcher and systemd unit paths.
+
+Install options:
+  --url URL            Subscription URL, e.g. http://IP:3434/peer_user01.mihomo.yaml
+                       URL userinfo is supported, e.g. http://user:pass@IP:3434/file.yaml
+  --file FILE          Local subscription YAML file, for Internal-pushed bootstrap
+  --user USER          Basic Auth username for subscription
+  --password PASS      Basic Auth password for subscription
+  --no-auth            Do not prompt for or send Basic Auth credentials
+  --version TAG        Mihomo version tag. Default: latest stable release
+  --binary-path PATH   Use an existing Mihomo binary instead of downloading
+  --mixed-port PORT    Persist this instance's local mixed port. Required for a
+                       named instance's first install.
+  --node NAME          Pin egress to one exact inline proxy name; requires python3-yaml.
+                       Persisted across refresh/restart. Missing nodes reject the update.
+                       Use --node auto to restore the subscription's default policy.
+  --no-start           Install/update files but do not start the service
+
+Update options:
+  --node NAME          Set/change the persisted node binding (or auto). Omission keeps it.
+  --url URL            Override saved subscription URL
+  --file FILE          Replace subscription from a local YAML file
+  --user USER          Override saved subscription username
+  --password PASS      Override saved subscription password
+  --no-auth            Clear saved Basic Auth credentials and fetch without auth
+
+TUN safety environment:
+  MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS
+                       Extra comma/space-separated CIDRs or IPs to keep outside TUN
+  MIHOMO_TUN_ROUTE_EXCLUDE_FILE
+                       Extra newline/comma-separated CIDRs, default /etc/mihomo-client/tun-route-exclude-addresses.txt
+  MIHOMO_TUN_AUTO_REDIRECT
+                       Linux nft auto-redirect toggle, default false for server hosts
+  MIHOMO_TUN_PRESERVE_SSH_CLIENT
+                       Add the current SSH client IP to route-exclude-address, default true
+
+Mihomo core download environment:
+  MIHOMO_GITHUB_CONNECT_TIMEOUT
+                       GitHub curl connect timeout in seconds, default 15
+  MIHOMO_GITHUB_MAX_TIME
+                       GitHub curl max time in seconds, default 90
+  MIHOMO_NPM_ENGINE_FALLBACK
+                       Use npm engine package before GitHub fallback, default true
+  MIHOMO_NPM_ENGINE_PACKAGE
+                       Override npm package name, default @qpjoy/electron-plugin-tunnel-engine-<platform>
+  MIHOMO_NPM_ENGINE_VERSION
+                       npm engine package version or dist-tag, default latest
+  MIHOMO_NPM_REGISTRY
+                       Optional npm registry URL for the fallback package
+  MIHOMO_NPM_CACHE
+                       Optional npm cache directory. Defaults to a temporary fallback-only cache
+
+Uninstall options:
+  --purge              Also remove config, env, downloaded YAML, and Mihomo binary
+
+Examples:
+  sudo bash ./scripts/mihomo-client.sh install \
+    --url http://IP:3434/peer_user01.mihomo.yaml \
+    --user download \
+    --password pass
+
+  sudo bash ./scripts/mihomo-client.sh install \
+    --url http://IP:3434/peer_user01.mihomo.yaml \
+    --binary-path /tmp/mihomo
+
+  sudo bash ./scripts/mihomo-client.sh install \
+    --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
+
+  sudo bash ./scripts/mihomo-client.sh install \
+    --instance subscriptions \
+    --mixed-port 7890 \
+    --url http://user:pass@IP:3434/peer_subscriptions.mihomo.yaml
+
+  sudo bash ./scripts/mihomo-client.sh status --instance subscriptions
+  curl --proxy http://127.0.0.1:7890 https://www.google.com/generate_204
+
+  sudo bash ./scripts/mihomo-client.sh update-subscription
+  sudo bash ./scripts/mihomo-client.sh update-subscription --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
+  sudo bash ./scripts/mihomo-client.sh start
+  sudo bash ./scripts/mihomo-client.sh egress-on
+  sudo bash ./scripts/mihomo-client.sh egress-off
+  sudo bash ./scripts/mihomo-client.sh proxy-on
+  sudo bash ./scripts/mihomo-client.sh tun-on
+  sudo MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS="203.0.113.10/32,198.51.100.0/24" bash ./scripts/mihomo-client.sh tun-on
+  sudo bash ./scripts/mihomo-client.sh ssh-proxy-on
+  sudo bash ./scripts/mihomo-client.sh daemon-proxy-on
+  sudo bash ./scripts/mihomo-client.sh run curl -I https://www.google.com/generate_204
+  sudo bash ./scripts/mihomo-client.sh run ./electron-server/scripts/manage.sh redeploy
+  sudo bash ./scripts/mihomo-client.sh print-env
+EOF
+}
+
+die() {
+	echo "Error: $*" >&2
+	exit 1
+}
+
+log() {
+	echo "[mihomo-client] $*" >&2
+}
+
+require_host_integration_allowed() {
+	case "$MIHOMO_EXPLICIT_USE_ONLY" in
+		1|true|TRUE|yes|YES|on|ON)
+			die "Instance '$MIHOMO_INSTANCE' is explicit-use-only. Use its local mixed port directly; host proxy, SSH, daemon and TUN wiring are disabled."
+		;;
+	esac
+}
+
+validate_mixed_port() {
+	local port="$1"
+	[[ "$port" =~ ^[0-9]+$ ]] || die "Mixed port must be an integer from 1 to 65535."
+	[[ "$port" -ge 1 && "$port" -le 65535 ]] || die "Mixed port must be an integer from 1 to 65535."
+	if [[ "$MIHOMO_INSTANCE" == "subscriptions" && "$port" != "7890" ]]; then
+		die "Instance 'subscriptions' is pinned to mixed port 7890 so it cannot collide with the default 7788 service."
+	fi
+}
+
+enable_verbose() {
+	MIHOMO_VERBOSE="true"
+	set -x
+}
+
+require_root() {
+	[[ "${EUID:-0}" -eq 0 ]] || die "Please run this script as root."
+}
+
+require_cmd() {
+	command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+ensure_dirs() {
+	mkdir -p "$MIHOMO_HOME"
+	chmod 700 "$MIHOMO_HOME"
+}
+
+set_env_value() {
+	local key="$1"
+	local value="$2"
+	local tmp escaped
+
+	escaped="$(printf "%s" "$value" | sed "s/'/'\\\\''/g")"
+	value="'$escaped'"
+	tmp="$(mktemp)"
+
+	if [[ -f "$MIHOMO_ENV_FILE" ]]; then
+		awk -v key="$key" -v value="$value" '
+			BEGIN { updated = 0 }
+			$0 ~ "^" key "=" {
+				print key "=" value
+				updated = 1
+				next
+			}
+			{ print }
+			END {
+				if (!updated) {
+					print key "=" value
+				}
+			}
+		' "$MIHOMO_ENV_FILE" > "$tmp"
+	else
+		printf "%s=%s\n" "$key" "$value" > "$tmp"
+	fi
+
+	mv "$tmp" "$MIHOMO_ENV_FILE"
+	chmod 600 "$MIHOMO_ENV_FILE"
+}
+
+load_env() {
+	[[ -f "$MIHOMO_ENV_FILE" ]] || return 0
+	set -a
+	# shellcheck disable=SC1090
+	source "$MIHOMO_ENV_FILE"
+	set +a
+	if [[ "$MIHOMO_INSTANCE" == "subscriptions" && "${MIHOMO_MIXED_PORT:-7890}" != "7890" ]]; then
+		die "Instance 'subscriptions' has an unsafe persisted mixed port. It is pinned to 7890 so it cannot collide with the default 7788 service."
+	fi
+}
+
+prompt_default() {
+	local prompt="$1"
+	local default_value="${2:-}"
+	local result
+
+	if [[ -n "$default_value" ]]; then
+		read -r -p "$prompt [$default_value]: " result
+		echo "${result:-$default_value}"
+	else
+		read -r -p "$prompt: " result
+		echo "$result"
+	fi
+}
+
+prompt_password() {
+	local prompt="$1"
+	local value
+	read -r -s -p "$prompt: " value
+	echo
+	echo "$value"
+}
+
+extract_auth_from_url() {
+	local raw_url="$1"
+	python3 - "$raw_url" <<'PY'
+import sys
+from urllib.parse import urlsplit, urlunsplit, unquote
+
+raw = sys.argv[1]
+parts = urlsplit(raw)
+
+username = parts.username or ""
+password = parts.password or ""
+
+hostname = parts.hostname or ""
+netloc = hostname
+if parts.port:
+    netloc = f"{netloc}:{parts.port}"
+
+sanitized = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+print(sanitized)
+print(unquote(username))
+print(unquote(password))
+PY
+}
+
+url_has_userinfo() {
+	local url="$1"
+	local rest authority
+
+	case "$url" in
+		http://*|https://*) ;;
+		*) return 1 ;;
+	esac
+
+	rest="${url#*://}"
+	authority="${rest%%/*}"
+	authority="${authority%%\?*}"
+	authority="${authority%%#*}"
+	[[ "$authority" == *@* ]]
+}
+
+normalize_subscription_inputs() {
+	local url="$1"
+	local username="$2"
+	local password="$3"
+	local sanitized_url parsed_user parsed_pass
+	local -a parsed=()
+
+	if [[ "$url" == *"@"* ]] && [[ "$url" == http://* || "$url" == https://* ]]; then
+		mapfile -t parsed < <(extract_auth_from_url "$url")
+		if [[ "${#parsed[@]}" -ge 3 ]]; then
+			sanitized_url="${parsed[0]}"
+			parsed_user="${parsed[1]}"
+			parsed_pass="${parsed[2]}"
+			url="$sanitized_url"
+			log "Detected Basic Auth inside subscription URL. Credentials will be stored separately."
+			if [[ -z "$username" && -n "$parsed_user" ]]; then
+				username="$parsed_user"
+			fi
+			if [[ -z "$password" && -n "$parsed_pass" ]]; then
+				password="$parsed_pass"
+			fi
+		fi
+	fi
+
+	printf "%s\n%s\n%s\n" "$url" "$username" "$password"
+}
+
+detect_asset_selector() {
+	case "$(uname -m)" in
+		x86_64|amd64) echo "linux-amd64-v1" ;;
+		aarch64|arm64) echo "linux-arm64" ;;
+		armv7l|armv7) echo "linux-armv7" ;;
+		armv6l|armv6) echo "linux-armv6" ;;
+		i386|i686) echo "linux-386" ;;
+		riscv64) echo "linux-riscv64" ;;
+		s390x) echo "linux-s390x" ;;
+		*) die "Unsupported CPU architecture: $(uname -m)" ;;
+	esac
+}
+
+detect_npm_engine_target() {
+	case "$(uname -m)" in
+		x86_64|amd64) echo "linux-x64" ;;
+		aarch64|arm64) echo "linux-arm64" ;;
+		*) return 1 ;;
+	esac
+}
+
+npm_engine_fallback_enabled() {
+	case "$MIHOMO_NPM_ENGINE_FALLBACK" in
+		0|false|FALSE|no|NO|off|OFF) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+github_curl() {
+	curl -fsSL \
+		--connect-timeout "$MIHOMO_GITHUB_CONNECT_TIMEOUT" \
+		--max-time "$MIHOMO_GITHUB_MAX_TIME" \
+		"$@"
+}
+
+resolve_release_asset() {
+	local version="${1:-latest}"
+	local selector="$2"
+	local api_url json_file
+
+	json_file="$(mktemp)"
+	if [[ "$version" == "latest" ]]; then
+		api_url="$GITHUB_API_ROOT"
+		log "Querying latest stable Mihomo release metadata for $selector"
+	else
+		api_url="$GITHUB_API_ROOT/tags/$version"
+		log "Querying Mihomo release metadata for tag $version ($selector)"
+	fi
+
+	if [[ "$version" == "latest" ]]; then
+		if ! github_curl "$api_url" -o "$json_file"; then
+			rm -f "$json_file"
+			return 1
+		fi
+		if ! python3 - "$json_file" "$selector" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+selector = sys.argv[2]
+releases = json.loads(path.read_text())
+
+for rel in releases:
+    if rel.get("prerelease"):
+        continue
+    assets = rel.get("assets", [])
+    for asset in assets:
+        name = asset.get("name", "")
+        if name.startswith(f"mihomo-{selector}-") and name.endswith(".gz"):
+            print(rel.get("tag_name", ""))
+            print(asset.get("browser_download_url", ""))
+            sys.exit(0)
+raise SystemExit(1)
+PY
+		then
+			rm -f "$json_file"
+			return 1
+		fi
+	else
+		if ! github_curl "$api_url" -o "$json_file"; then
+			rm -f "$json_file"
+			return 1
+		fi
+		if ! python3 - "$json_file" "$selector" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+selector = sys.argv[2]
+rel = json.loads(path.read_text())
+assets = rel.get("assets", [])
+
+for asset in assets:
+    name = asset.get("name", "")
+    if name.startswith(f"mihomo-{selector}-") and name.endswith(".gz"):
+        print(rel.get("tag_name", ""))
+        print(asset.get("browser_download_url", ""))
+        sys.exit(0)
+raise SystemExit(1)
+PY
+		then
+			rm -f "$json_file"
+			return 1
+		fi
+	fi
+	rm -f "$json_file"
+}
+
+install_binary_from_github() {
+	local version="${1:-latest}"
+	local selector release_info tag download_url tmpdir archive tmpbin
+
+	if ! command -v curl >/dev/null 2>&1; then
+		log "curl is unavailable; cannot download Mihomo from GitHub"
+		return 1
+	fi
+	if ! command -v python3 >/dev/null 2>&1; then
+		log "python3 is unavailable; cannot parse Mihomo release metadata from GitHub"
+		return 1
+	fi
+	if ! command -v gzip >/dev/null 2>&1; then
+		log "gzip is unavailable; cannot unpack Mihomo GitHub asset"
+		return 1
+	fi
+
+	selector="$(detect_asset_selector)"
+	mapfile -t release_info < <(resolve_release_asset "$version" "$selector")
+	if [[ "${#release_info[@]}" -lt 2 ]]; then
+		log "Failed to resolve Mihomo release asset for $selector from GitHub"
+		return 1
+	fi
+	tag="${release_info[0]}"
+	download_url="${release_info[1]}"
+
+	tmpdir="$(mktemp -d)"
+	archive="$tmpdir/mihomo.gz"
+	tmpbin="$tmpdir/mihomo"
+
+	log "Downloading Mihomo $tag from GitHub"
+	if ! github_curl "$download_url" -o "$archive"; then
+		log "Failed to download Mihomo $tag from GitHub"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	if ! gzip -dc "$archive" > "$tmpbin"; then
+		log "Failed to unpack Mihomo GitHub asset"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	if ! chmod 755 "$tmpbin" || ! mv "$tmpbin" "$MIHOMO_BIN"; then
+		log "Failed to install Mihomo binary to $MIHOMO_BIN"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	set_env_value MIHOMO_VERSION "$tag"
+	echo "Installed Mihomo $tag to $MIHOMO_BIN"
+	rm -rf "$tmpdir"
+}
+
+install_binary_from_npm_engine() {
+	local target package_name package_version package_spec tmpdir npm_cache npm_output tarball archive tmpbin source_label
+	local -a npm_args tarballs
+
+	if ! command -v npm >/dev/null 2>&1; then
+		log "npm is unavailable; cannot use npm Mihomo engine package"
+		return 1
+	fi
+	if ! command -v tar >/dev/null 2>&1; then
+		log "tar is unavailable; cannot unpack npm Mihomo engine package"
+		return 1
+	fi
+	if ! command -v gzip >/dev/null 2>&1; then
+		log "gzip is unavailable; cannot unpack npm Mihomo engine package"
+		return 1
+	fi
+
+	target="$(detect_npm_engine_target)" || {
+		log "No npm Mihomo engine package mapping for CPU architecture: $(uname -m)"
+		return 1
+	}
+	package_name="${MIHOMO_NPM_ENGINE_PACKAGE:-@qpjoy/electron-plugin-tunnel-engine-$target}"
+	package_spec="$package_name@$MIHOMO_NPM_ENGINE_VERSION"
+	tmpdir="$(mktemp -d)"
+	npm_cache="${MIHOMO_NPM_CACHE:-$tmpdir/npm-cache}"
+
+	npm_args=(--pack-destination "$tmpdir" --silent --cache "$npm_cache")
+	if [[ -n "$MIHOMO_NPM_REGISTRY" ]]; then
+		npm_args+=(--registry "$MIHOMO_NPM_REGISTRY")
+	fi
+
+	log "Trying npm Mihomo engine package: $package_spec"
+	if ! npm_output="$(npm pack "$package_spec" "${npm_args[@]}" 2>&1)"; then
+		log "npm engine package failed while fetching $package_spec"
+		if [[ -n "$npm_output" ]]; then
+			printf "%s\n" "$npm_output" >&2
+		fi
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	tarballs=("$tmpdir"/*.tgz)
+	if [[ ! -f "${tarballs[0]}" ]]; then
+		log "npm engine package did not produce a package tarball"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	tarball="${tarballs[0]}"
+
+	if ! tar -xzf "$tarball" -C "$tmpdir"; then
+		log "Failed to extract npm Mihomo engine package"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	archive="$tmpdir/package/resources/engine/$target/mihomo.gz"
+	if [[ ! -f "$archive" ]]; then
+		log "npm Mihomo engine package is missing resources/engine/$target/mihomo.gz"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	tmpbin="$tmpdir/mihomo"
+	if ! gzip -dc "$archive" > "$tmpbin"; then
+		log "Failed to unpack Mihomo binary from npm engine package"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	if ! chmod 755 "$tmpbin" || ! mv "$tmpbin" "$MIHOMO_BIN"; then
+		log "Failed to install npm Mihomo engine binary to $MIHOMO_BIN"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	package_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmpdir/package/package.json" | head -n 1)"
+	source_label="npm:$package_name"
+	if [[ -n "$package_version" ]]; then
+		source_label="$source_label@$package_version"
+	else
+		source_label="$source_label@$MIHOMO_NPM_ENGINE_VERSION"
+	fi
+	set_env_value MIHOMO_VERSION "$source_label"
+	echo "Installed Mihomo from $source_label to $MIHOMO_BIN"
+	rm -rf "$tmpdir"
+}
+
+install_binary() {
+	local version="${1:-latest}"
+
+	if npm_engine_fallback_enabled; then
+		if install_binary_from_npm_engine; then
+			return 0
+		fi
+		log "npm Mihomo engine install failed; falling back to GitHub"
+	else
+		log "npm Mihomo engine install is disabled; using GitHub"
+	fi
+
+	install_binary_from_github "$version" || die "Failed to install Mihomo from npm engine package or GitHub."
+}
+
+install_binary_from_path() {
+	local source_path="$1"
+	[[ -n "$source_path" ]] || die "Binary path is required."
+	[[ -f "$source_path" ]] || die "Mihomo binary not found: $source_path"
+	[[ -x "$source_path" ]] || die "Mihomo binary is not executable: $source_path"
+	cp "$source_path" "$MIHOMO_BIN"
+	chmod 755 "$MIHOMO_BIN"
+	set_env_value MIHOMO_VERSION "local"
+	echo "Installed Mihomo local binary to $MIHOMO_BIN"
+}
+
+install_client_launcher() {
+	local source_script
+	source_script="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+	[[ -f "$source_script" ]] || die "Could not locate current mihomo-client script: $source_script"
+	cp "$source_script" "$MIHOMO_CLIENT_LAUNCHER"
+	chmod 755 "$MIHOMO_CLIENT_LAUNCHER"
+	log "Installed global launcher to $MIHOMO_CLIENT_LAUNCHER"
+}
+
+write_service_file() {
+	cat > "$MIHOMO_SERVICE_FILE" <<EOF
+[Unit]
+Description=Mihomo Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$MIHOMO_HOME
+ExecStart=$MIHOMO_BIN -d $MIHOMO_HOME -f $MIHOMO_CONFIG_FILE
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+systemd_reload() {
+	systemctl daemon-reload
+}
+
+service_is_active() {
+	systemctl is-active --quiet "$MIHOMO_SERVICE_NAME"
+}
+
+ensure_subscription_source() {
+	if [[ ! -f "$MIHOMO_SUBSCRIPTION_FILE" && -f "$MIHOMO_CONFIG_FILE" ]]; then
+		cp "$MIHOMO_CONFIG_FILE" "$MIHOMO_SUBSCRIPTION_FILE"
+		chmod 600 "$MIHOMO_SUBSCRIPTION_FILE"
+	fi
+	[[ -f "$MIHOMO_SUBSCRIPTION_FILE" ]] || die "Subscription source not found. Please run install or update-subscription first."
+}
+
+detect_tun_proxy_group_name() {
+	local configured="${MIHOMO_TUN_PROXY_GROUP:-}"
+	local detected=""
+	if [[ -n "$configured" ]]; then
+		echo "$configured"
+		return
+	fi
+	if [[ -f "$MIHOMO_SUBSCRIPTION_FILE" ]]; then
+		detected="$(awk '
+			/^[[:space:]]*proxy-groups:[[:space:]]*$/ { in_groups=1; next }
+			in_groups && /^[^[:space:]-]/ { in_groups=0 }
+			in_groups && /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
+				line=$0
+				sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", line)
+				gsub(/^[[:space:]"]+/, "", line)
+				gsub(/[[:space:]"]+$/, "", line)
+				print line
+				exit
+			}
+			in_groups && /^[[:space:]]*name:[[:space:]]*/ {
+				line=$0
+				sub(/^[[:space:]]*name:[[:space:]]*/, "", line)
+				gsub(/^[[:space:]"]+/, "", line)
+				gsub(/[[:space:]"]+$/, "", line)
+				print line
+				exit
+			}
+		' "$MIHOMO_SUBSCRIPTION_FILE" || true)"
+	fi
+	echo "${detected:-PROXY}"
+}
+
+yaml_bool() {
+	local value="$1"
+	local name="${2:-value}"
+
+	case "$value" in
+		true|TRUE|True|1|yes|YES|Yes|on|ON|On)
+			echo "true"
+		;;
+		false|FALSE|False|0|no|NO|No|off|OFF|Off)
+			echo "false"
+		;;
+		*)
+			die "$name must be true or false, got: $value"
+		;;
+	esac
+}
+
+is_ipv4_address() {
+	local ip="$1"
+	local a b c d octet
+
+	[[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+	IFS=. read -r a b c d <<< "$ip"
+	for octet in "$a" "$b" "$c" "$d"; do
+		[[ "$octet" =~ ^[0-9]+$ ]] || return 1
+		(( octet >= 0 && octet <= 255 )) || return 1
+	done
+}
+
+normalize_route_exclude_token() {
+	local token="$1"
+
+	token="${token%%#*}"
+	token="$(printf "%s" "$token" | awk '{$1=$1; print}')"
+	[[ -n "$token" ]] || return 0
+
+	if [[ "$token" == */* ]]; then
+		echo "$token"
+	elif is_ipv4_address "$token"; then
+		echo "$token/32"
+	elif [[ "$token" == *:* ]]; then
+		echo "$token/128"
+	else
+		echo "$token"
+	fi
+}
+
+emit_route_exclude_tokens() {
+	local raw="$1"
+	local token
+
+	[[ -n "$raw" ]] || return 0
+	printf "%s\n" "$raw" | tr ',[:space:]' '\n' | while IFS= read -r token; do
+		normalize_route_exclude_token "$token"
+	done
+}
+
+emit_route_exclude_file_tokens() {
+	local line
+
+	[[ -f "$MIHOMO_TUN_ROUTE_EXCLUDE_FILE" ]] || return 0
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		emit_route_exclude_tokens "$line"
+	done < "$MIHOMO_TUN_ROUTE_EXCLUDE_FILE"
+}
+
+emit_ssh_client_route_exclude() {
+	local peer=""
+
+	if [[ -n "${SSH_CLIENT:-}" ]]; then
+		peer="${SSH_CLIENT%% *}"
+	elif [[ -n "${SSH_CONNECTION:-}" ]]; then
+		peer="${SSH_CONNECTION%% *}"
+	fi
+	normalize_route_exclude_token "$peer"
+}
+
+tun_route_exclude_addresses() {
+	{
+		cat <<'EOF'
+10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16
+169.254.0.0/16
+100.64.0.0/10
+10.88.0.0/16
+10.89.0.0/16
+10.90.0.0/16
+10.91.0.0/16
+100.100.100.200/32
+EOF
+		if [[ "$(yaml_bool "$MIHOMO_TUN_PRESERVE_SSH_CLIENT" "MIHOMO_TUN_PRESERVE_SSH_CLIENT")" == "true" ]]; then
+			emit_ssh_client_route_exclude
+		fi
+		emit_route_exclude_tokens "$MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS"
+		emit_route_exclude_file_tokens
+	} | awk 'NF && !seen[$0]++ { print }'
+}
+
+write_route_exclude_address_lines() {
+	tun_route_exclude_addresses | sed 's/^/    - /'
+}
+
+write_tun_overlay() {
+	ensure_subscription_source
+	local proxy_group auto_route auto_redirect auto_detect_interface strict_route
+	proxy_group="$(detect_tun_proxy_group_name)"
+	auto_route="$(yaml_bool "$MIHOMO_TUN_AUTO_ROUTE" "MIHOMO_TUN_AUTO_ROUTE")"
+	auto_redirect="$(yaml_bool "$MIHOMO_TUN_AUTO_REDIRECT" "MIHOMO_TUN_AUTO_REDIRECT")"
+	auto_detect_interface="$(yaml_bool "$MIHOMO_TUN_AUTO_DETECT_INTERFACE" "MIHOMO_TUN_AUTO_DETECT_INTERFACE")"
+	strict_route="$(yaml_bool "$MIHOMO_TUN_STRICT_ROUTE" "MIHOMO_TUN_STRICT_ROUTE")"
+	{
+		cat <<EOF
+tun:
+  enable: true
+  stack: system
+  auto-route: $auto_route
+  auto-redirect: $auto_redirect
+  auto-detect-interface: $auto_detect_interface
+  strict-route: $strict_route
+  route-exclude-address:
+EOF
+		write_route_exclude_address_lines
+		cat <<EOF
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  use-hosts: true
+  use-system-hosts: true
+  cache-algorithm: arc
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+    - 1.1.1.1
+    - 8.8.8.8
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+  fallback:
+    - tls://1.1.1.1
+    - tls://8.8.8.8
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    geosite:
+      - gfw
+
+rules:
+  - DOMAIN-SUFFIX,local,DIRECT
+  - DOMAIN-SUFFIX,lan,DIRECT
+  - DOMAIN-SUFFIX,internal,DIRECT
+  - DOMAIN-SUFFIX,cluster.local,DIRECT
+  - DOMAIN,metadata.google.internal,DIRECT
+  - DOMAIN,kubernetes.default.svc,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,10.88.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.89.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.90.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.91.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,100.100.100.200/32,DIRECT,no-resolve
+  - IP-CIDR6,::1/128,DIRECT,no-resolve
+  - IP-CIDR6,fc00::/7,DIRECT,no-resolve
+  - IP-CIDR6,fe80::/10,DIRECT,no-resolve
+  - GEOSITE,CN,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,$proxy_group
+EOF
+	} > "$MIHOMO_TUN_OVERLAY_FILE"
+	chmod 600 "$MIHOMO_TUN_OVERLAY_FILE"
+}
+
+remove_tun_overlay() {
+	rm -f "$MIHOMO_TUN_OVERLAY_FILE"
+}
+
+tun_enabled() {
+	[[ -f "$MIHOMO_TUN_OVERLAY_FILE" ]]
+}
+
+config_uses_geodata() {
+	grep -Eq '^[[:space:]]*geodata-mode:[[:space:]]*true([[:space:]]|$)' "$MIHOMO_SUBSCRIPTION_FILE"
+}
+
+config_has_geox_url() {
+	grep -Eq '^[[:space:]]*geox-url:[[:space:]]*$' "$MIHOMO_SUBSCRIPTION_FILE"
+}
+
+append_geox_overlay_if_needed() {
+	if config_uses_geodata && ! config_has_geox_url; then
+		log "Injecting geox-url mirror overrides for geo data downloads"
+		cat >> "$MIHOMO_CONFIG_FILE" <<EOF
+
+geox-url:
+  geoip: "$MIHOMO_GEOX_GEOIP_URL"
+  geosite: "$MIHOMO_GEOX_GEOSITE_URL"
+  mmdb: "$MIHOMO_GEOX_MMDB_URL"
+EOF
+	fi
+}
+
+apply_mixed_port_override() {
+	local tmp
+
+	tmp="$(mktemp)"
+	if grep -Eq '^[[:space:]]*mixed-port[[:space:]]*:' "$MIHOMO_CONFIG_FILE"; then
+		awk -v port="$MIHOMO_MIXED_PORT" '
+			BEGIN { done = 0 }
+			/^[[:space:]]*mixed-port[[:space:]]*:/ {
+				if (!done) {
+					print "mixed-port: " port
+					done = 1
+				}
+				next
+			}
+			{ print }
+		' "$MIHOMO_CONFIG_FILE" > "$tmp"
+	else
+		{
+			printf "mixed-port: %s\n" "$MIHOMO_MIXED_PORT"
+			cat "$MIHOMO_CONFIG_FILE"
+		} > "$tmp"
+	fi
+	mv "$tmp" "$MIHOMO_CONFIG_FILE"
+}
+
+apply_node_binding() {
+	[[ -n "${MIHOMO_PINNED_NODE:-}" ]] || return 0
+	require_cmd python3
+	python3 - "$MIHOMO_CONFIG_FILE" "$MIHOMO_PINNED_NODE" "$MIHOMO_INSTANCE" <<'PY'
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit('--node requires python3-yaml (Ubuntu/Debian: sudo apt-get install python3-yaml).')
+path, name, instance = sys.argv[1:]
+try:
+    with open(path) as stream:
+        config = yaml.safe_load(stream)
+    if not isinstance(config, dict):
+        raise ValueError('subscription must be a YAML mapping')
+    if name != 'auto':
+        matches = [p for p in config.get('proxies', []) if isinstance(p, dict) and p.get('name') == name]
+        if len(matches) != 1:
+            raise ValueError('pinned node must match exactly one inline proxy: ' + name)
+        if matches[0].get('dialer-proxy') not in (None, '', 'DIRECT'):
+            raise ValueError('pinned nodes with a dialer-proxy chain are not supported')
+        config['proxies'] = matches
+        config.pop('proxy-providers', None)
+        # Keep rule targets and DIRECT/REJECT rules, but every proxy group now
+        # contains only the chosen real node. No fallback can change its region.
+        config['proxy-groups'] = [
+            {'name': group['name'], 'type': 'select', 'proxies': [name]}
+            for group in config.get('proxy-groups', [])
+        ]
+    config.setdefault('profile', {})['store-selected'] = False
+    if instance != 'default':
+        # A copied subscription must not bind another instance's DNS/controller
+        # or extra proxy listeners. The CLI owns only its chosen mixed port.
+        for key in ('port', 'socks-port', 'redir-port', 'tproxy-port', 'listeners',
+                    'external-controller-tls', 'external-controller-unix', 'external-controller-pipe'):
+            config.pop(key, None)
+        config['external-controller'] = ''
+        if isinstance(config.get('dns'), dict):
+            config['dns']['listen'] = ''
+    with open(path, 'w') as stream:
+        # Older distro PyYAML has no sort_keys argument. Mapping order is not
+        # significant here; proxy and routing priority are preserved as lists.
+        yaml.safe_dump(config, stream, allow_unicode=True, default_flow_style=False)
+except (ValueError, TypeError, KeyError, yaml.YAMLError) as error:
+    sys.exit('Cannot apply --node: ' + str(error))
+PY
+}
+
+render_runtime_config() (
+	local destination="$MIHOMO_CONFIG_FILE"
+	if [[ -n "${1:-}" ]]; then MIHOMO_SUBSCRIPTION_FILE="$1"; fi
+	ensure_subscription_source
+	_mihomo_render_candidate="$(mktemp "$MIHOMO_HOME/.config.XXXXXX")"
+	trap 'rm -f -- "$_mihomo_render_candidate"' EXIT
+	chmod 600 "$_mihomo_render_candidate"
+	MIHOMO_CONFIG_FILE="$_mihomo_render_candidate"
+	cat "$MIHOMO_SUBSCRIPTION_FILE" > "$MIHOMO_CONFIG_FILE"
+	apply_mixed_port_override
+	append_geox_overlay_if_needed
+	if tun_enabled; then
+		printf "\n" >> "$MIHOMO_CONFIG_FILE"
+		cat "$MIHOMO_TUN_OVERLAY_FILE" >> "$MIHOMO_CONFIG_FILE"
+	fi
+	apply_node_binding
+	if [[ -n "${MIHOMO_PINNED_NODE:-}" ]]; then
+		"$MIHOMO_BIN" -t -d "$MIHOMO_HOME" -f "$MIHOMO_CONFIG_FILE" >/dev/null \
+			|| die "Pinned config validation failed; the existing runtime config is unchanged."
+	fi
+	chmod 600 "$MIHOMO_CONFIG_FILE"
+	mv "$MIHOMO_CONFIG_FILE" "$destination"
+)
+
+fetch_subscription() (
+	local url="$1"
+	local username="${2:-}"
+	local password="${3:-}"
+	local curl_user=""
+	local -a curl_args=()
+	_fetch_subscription_tmp_file=""
+	_fetch_subscription_curl_config=""
+
+	cleanup_fetch_subscription() {
+		[[ -z "$_fetch_subscription_tmp_file" ]] || rm -f -- "$_fetch_subscription_tmp_file"
+		[[ -z "$_fetch_subscription_curl_config" ]] || rm -f -- "$_fetch_subscription_curl_config"
+	}
+	trap cleanup_fetch_subscription EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+
+	[[ -n "$url" ]] || die "Subscription URL is required."
+
+	_fetch_subscription_tmp_file="$(mktemp)"
+	chmod 600 "$_fetch_subscription_tmp_file"
+	curl_args=(-fsSL)
+	if [[ -n "$username" || -n "$password" ]]; then
+		_fetch_subscription_curl_config="$(mktemp)"
+		chmod 600 "$_fetch_subscription_curl_config"
+		curl_user="${username}:${password}"
+		curl_user="${curl_user//\\/\\\\}"
+		curl_user="${curl_user//\"/\\\"}"
+		curl_user="${curl_user//$'\t'/\\t}"
+		curl_user="${curl_user//$'\r'/\\r}"
+		curl_user="${curl_user//$'\n'/\\n}"
+		curl_user="${curl_user//$'\v'/\\v}"
+		printf 'user = "%s"\n' "$curl_user" > "$_fetch_subscription_curl_config"
+		curl_args+=(--config "$_fetch_subscription_curl_config")
+	fi
+
+	log "Fetching remote subscription: $url"
+	if ! curl "${curl_args[@]}" "$url" -o "$_fetch_subscription_tmp_file"; then
+		die "Failed to fetch remote subscription."
+	fi
+	if [[ -n "$_fetch_subscription_curl_config" ]]; then
+		rm -f -- "$_fetch_subscription_curl_config"
+		_fetch_subscription_curl_config=""
+	fi
+	[[ -s "$_fetch_subscription_tmp_file" ]] || die "Downloaded subscription is empty."
+	render_runtime_config "$_fetch_subscription_tmp_file"
+	mv "$_fetch_subscription_tmp_file" "$MIHOMO_SUBSCRIPTION_FILE"
+	_fetch_subscription_tmp_file=""
+	chmod 600 "$MIHOMO_SUBSCRIPTION_FILE"
+)
+
+install_subscription_file() {
+	local file_path="$1"
+
+	[[ -n "$file_path" ]] || die "Subscription file is required."
+	[[ -f "$file_path" ]] || die "Subscription file not found: $file_path"
+	[[ -s "$file_path" ]] || die "Subscription file is empty: $file_path"
+
+	ensure_dirs
+	log "Installing local subscription file: $file_path"
+	render_runtime_config "$file_path"
+	cp "$file_path" "$MIHOMO_SUBSCRIPTION_FILE"
+	chmod 600 "$MIHOMO_SUBSCRIPTION_FILE"
+}
+
+# The port the system-wide proxy wiring should point at. Defaults to this
+# instance's own listener, so behaviour is unchanged unless a port is published
+# explicitly. It may legitimately name a port this instance does not own, e.g.
+# when pointing the host at a separate corporate proxy.
+publish_port() {
+	if [[ -n "${MIHOMO_PUBLISH_PORT:-}" ]]; then
+		printf '%s' "$MIHOMO_PUBLISH_PORT"
+		return 0
+	fi
+	mixed_port_from_config
+}
+
+mixed_port_from_config() {
+	if [[ -f "$MIHOMO_CONFIG_FILE" ]]; then
+		awk -F: '/^[[:space:]]*mixed-port[[:space:]]*:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "$MIHOMO_CONFIG_FILE"
+	fi
+}
+
+proxy_env_lines() {
+	local port="$1"
+	cat <<EOF
+export http_proxy=http://127.0.0.1:$port
+export https_proxy=http://127.0.0.1:$port
+export HTTP_PROXY=http://127.0.0.1:$port
+export HTTPS_PROXY=http://127.0.0.1:$port
+export all_proxy=socks5://127.0.0.1:$port
+export ALL_PROXY=socks5://127.0.0.1:$port
+export no_proxy=$MIHOMO_NO_PROXY
+export NO_PROXY=$MIHOMO_NO_PROXY
+EOF
+}
+
+# Clients match no_proxy against the hostname, not the resolved address, so the
+# private CIDRs above never exempt an internal domain. Without these vars an
+# internal host name is tunnelled instead of going direct.
+proxy_unset_env_lines() {
+	cat <<'EOF'
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+unset all_proxy ALL_PROXY no_proxy NO_PROXY
+EOF
+}
+
+print_env_command() {
+	local port
+	port="$(publish_port)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	proxy_env_lines "$port"
+}
+
+print_unset_env_command() {
+	proxy_unset_env_lines
+}
+
+docker_proxy_env_lines() {
+	local port="$1"
+	cat <<EOF
+HTTP_PROXY=http://127.0.0.1:$port
+HTTPS_PROXY=http://127.0.0.1:$port
+NO_PROXY=$MIHOMO_NO_PROXY
+http_proxy=http://127.0.0.1:$port
+https_proxy=http://127.0.0.1:$port
+no_proxy=$MIHOMO_NO_PROXY
+EOF
+}
+
+service_dropin_dir() {
+	local service="$1"
+	echo "/etc/systemd/system/${service}.d"
+}
+
+service_dropin_file() {
+	local service="$1"
+	echo "$(service_dropin_dir "$service")/$MIHOMO_DAEMON_PROXY_DROPIN_NAME"
+}
+
+service_exists() {
+	local service="$1"
+	local state
+	state="$(systemctl show -p LoadState --value "$service" 2>/dev/null || true)"
+	[[ -n "$state" && "$state" != "not-found" ]]
+}
+
+managed_daemon_services() {
+	local service
+	for service in $MIHOMO_DAEMON_PROXY_SERVICES; do
+		if service_exists "$service"; then
+			echo "$service"
+		fi
+	done
+}
+
+managed_daemon_services_with_proxy() {
+	local service file
+	for service in $MIHOMO_DAEMON_PROXY_SERVICES; do
+		file="$(service_dropin_file "$service")"
+		if [[ -f "$file" ]]; then
+			echo "$service"
+		fi
+	done
+}
+
+ssh_proxy_enabled() {
+	[[ -f "$MIHOMO_SSH_CONFIG_FILE" ]]
+}
+
+status_command() {
+	local port version daemon_services
+	load_env
+	version="${MIHOMO_VERSION:-unknown}"
+	port="$(mixed_port_from_config || true)"
+	daemon_services="$(managed_daemon_services_with_proxy | paste -sd ',' - 2>/dev/null || true)"
+
+	if [[ "$MIHOMO_INSTANCE" != "default" ]]; then
+		echo "Mihomo instance: $MIHOMO_INSTANCE"
+		echo "Instance mode: $([[ "$MIHOMO_EXPLICIT_USE_ONLY" == "true" ]] && echo explicit-use-only || echo standard)"
+	fi
+	echo "Mihomo binary: $MIHOMO_BIN"
+	echo "Mihomo version: $version"
+	echo "Config file: $MIHOMO_CONFIG_FILE"
+	echo "Subscription file: $MIHOMO_SUBSCRIPTION_FILE"
+	echo "Subscription URL: ${MIHOMO_SUBSCRIPTION_URL:-unset}"
+	echo "Mixed port: ${port:-unknown}"
+	echo "Node binding: ${MIHOMO_PINNED_NODE:-auto (subscription policy)}"
+	report_mixed_port_binding "$port"
+	echo "Shell proxy profile: $([[ -f "$MIHOMO_PROFILE_PROXY_FILE" ]] && echo enabled || echo disabled)"
+	echo "TUN mode: $([[ -f "$MIHOMO_TUN_OVERLAY_FILE" ]] && echo enabled || echo disabled)"
+	echo "SSH proxy config: $([[ -f "$MIHOMO_SSH_CONFIG_FILE" ]] && echo enabled || echo disabled)"
+	echo "Managed daemon proxy services: ${daemon_services:-none}"
+	echo "NO_PROXY: $MIHOMO_NO_PROXY"
+	report_sibling_instances "$port"
+	echo
+	systemctl status "$MIHOMO_SERVICE_NAME" --no-pager || true
+}
+
+logs_command() {
+	journalctl -u "$MIHOMO_SERVICE_NAME" -n 100 --no-pager
+}
+
+update_subscription_command() {
+	local url="${1:-}"
+	local username="${2:-}"
+	local password="${3:-}"
+	local file_path="${4:-}"
+	local no_auth="${5:-false}"
+	local node="${6:-}"
+	local -a normalized=()
+
+	if [[ "$MIHOMO_INSTANCE" != "default" ]] \
+		&& ! grep -q '^MIHOMO_MIXED_PORT=' "$MIHOMO_ENV_FILE" 2>/dev/null; then
+		local install_port="PORT"
+		[[ "$MIHOMO_INSTANCE" == "subscriptions" ]] && install_port="7890"
+		die "Mihomo instance '$MIHOMO_INSTANCE' is not installed. Run: qp-tunnel-cli install --instance $MIHOMO_INSTANCE --mixed-port $install_port --url '<subscription-url>'"
+	fi
+
+	load_env
+	if [[ -n "$node" ]]; then MIHOMO_PINNED_NODE="$node"; fi
+
+	if [[ -n "$file_path" ]]; then
+		install_subscription_file "$file_path"
+		set_env_value MIHOMO_PINNED_NODE "${MIHOMO_PINNED_NODE:-}"
+		set_env_value MIHOMO_SUBSCRIPTION_SOURCE "local-file"
+		set_env_value MIHOMO_SUBSCRIPTION_LOCAL_FILE "$file_path"
+		set_env_value MIHOMO_SUBSCRIPTION_URL ""
+		set_env_value MIHOMO_SUBSCRIPTION_USER ""
+		set_env_value MIHOMO_SUBSCRIPTION_PASSWORD ""
+
+		if service_is_active; then
+			log "Restarting Mihomo service after local subscription update"
+			systemctl restart "$MIHOMO_SERVICE_NAME"
+			echo "Subscription updated from local file and service restarted."
+		else
+			echo "Subscription updated from local file."
+		fi
+		return
+	fi
+
+	url="${url:-${MIHOMO_SUBSCRIPTION_URL:-}}"
+	# Normalize URL userinfo before falling back to persisted credentials. An
+	# explicit --url must not be stripped and then authenticated with credentials
+	# saved for an older subscription. Explicit --user/--password still win
+	# because normalize_subscription_inputs only fills empty values.
+	mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
+	url="${normalized[0]}"
+	username="${normalized[1]}"
+	password="${normalized[2]}"
+	if [[ "$no_auth" == "true" ]]; then
+		username=""
+		password=""
+	else
+		username="${username:-${MIHOMO_SUBSCRIPTION_USER:-}}"
+		password="${password:-${MIHOMO_SUBSCRIPTION_PASSWORD:-}}"
+	fi
+
+	[[ -n "$url" ]] || die "No subscription URL configured. Use install or pass --url."
+
+	fetch_subscription "$url" "$username" "$password"
+	set_env_value MIHOMO_PINNED_NODE "${MIHOMO_PINNED_NODE:-}"
+	set_env_value MIHOMO_SUBSCRIPTION_SOURCE "url"
+	set_env_value MIHOMO_SUBSCRIPTION_LOCAL_FILE ""
+	set_env_value MIHOMO_SUBSCRIPTION_URL "$url"
+	set_env_value MIHOMO_SUBSCRIPTION_USER "$username"
+	set_env_value MIHOMO_SUBSCRIPTION_PASSWORD "$password"
+
+	if service_is_active; then
+		log "Restarting Mihomo service after subscription update"
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+		echo "Subscription updated and service restarted."
+	else
+		echo "Subscription updated."
+	fi
+}
+
+proxy_on_command() {
+	local port
+	require_host_integration_allowed
+	port="$(publish_port)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	cat > "$MIHOMO_PROFILE_PROXY_FILE" <<EOF
+# Generated by scripts/mihomo-client.sh
+$(proxy_env_lines "$port")
+EOF
+	chmod 644 "$MIHOMO_PROFILE_PROXY_FILE"
+	echo "Shell proxy exports enabled at $MIHOMO_PROFILE_PROXY_FILE"
+	echo "Open a new shell or run: source $MIHOMO_PROFILE_PROXY_FILE"
+}
+
+# This tool owns exactly one profile file. Proxy exports are commonly also kept
+# in user dotfiles, /etc/bashrc or /etc/environment, which are not ours to edit
+# and which /etc/profile.d does not cover for non-login shells. Report them so
+# "off" is never silently incomplete for other accounts.
+report_foreign_proxy_sources() {
+	local port="${1:-}"
+	[[ -n "$port" ]] || return 0
+	local candidate
+	local -a files=()
+	local -a hits=()
+
+	for candidate in /etc/environment /etc/profile /etc/bashrc /etc/bash.bashrc \
+		/etc/zsh/zshenv /etc/zsh/zprofile /etc/zsh/zshrc \
+		/etc/profile.d/*.sh /root/.bashrc /root/.bash_profile /root/.profile \
+		/root/.zshrc /root/.zshenv /home/*/.bashrc /home/*/.bash_profile \
+		/home/*/.profile /home/*/.zshrc /home/*/.zshenv; do
+		[[ -f "$candidate" ]] || continue
+		[[ "$candidate" == "$MIHOMO_PROFILE_PROXY_FILE" ]] && continue
+		files+=("$candidate")
+	done
+	[[ "${#files[@]}" -gt 0 ]] || return 0
+
+	mapfile -t hits < <(grep -lE "(127\.0\.0\.1|localhost):${port}\b" "${files[@]}" 2>/dev/null || true)
+	[[ "${#hits[@]}" -gt 0 ]] || return 0
+
+	echo
+	echo "Other files still point a proxy at port ${port}. They are not managed here:"
+	local hit
+	local sibling=false
+	for hit in "${hits[@]}"; do
+		if grep -q "$MIHOMO_GENERATED_MARKER" "$hit" 2>/dev/null; then
+			# A separately namespaced instance of this same script, e.g. the
+			# mx-internal-egress one mx-launcher provisions. Turning it off is its
+			# own launcher's job; deleting its files from here would break it.
+			echo "  $hit (another instance of this script; turn it off with its own launcher)"
+			sibling=true
+		else
+			echo "  $hit"
+		fi
+	done
+	echo "Edit those files to stop their shells (including other users) from using the tunnel."
+	if [[ "$sibling" == true ]]; then
+		echo "Instance-owned files are left untouched on purpose: mx-internal-egress backs the Internal peer path."
+	fi
+}
+
+proxy_off_command() {
+	local port
+	require_host_integration_allowed
+	port="$(mixed_port_from_config || true)"
+	rm -f "$MIHOMO_PROFILE_PROXY_FILE"
+	echo "Shell proxy exports removed."
+	# Removing the profile cannot unexport variables that running shells already
+	# inherited, so those sessions keep tunnelling until they are cleaned.
+	echo "Already-open shells keep the old variables. Clear the current one with:"
+	echo "  eval \"\$(qp-tunnel-cli print-unset-env)\""
+	report_foreign_proxy_sources "$port"
+}
+
+write_ssh_proxy_helper() {
+	cat > "$MIHOMO_SSH_PROXY_HELPER" <<'EOF'
+#!/bin/sh
+set -eu
+
+HOST="${1:?host required}"
+PORT="${2:?port required}"
+PROXY_ADDR="${MIHOMO_SSH_PROXY_ADDR:-127.0.0.1:7788}"
+
+if command -v nc >/dev/null 2>&1; then
+	exec nc -x "$PROXY_ADDR" -X 5 "$HOST" "$PORT"
+fi
+
+if command -v ncat >/dev/null 2>&1; then
+	exec ncat --proxy "$PROXY_ADDR" --proxy-type socks5 "$HOST" "$PORT"
+fi
+
+if command -v connect-proxy >/dev/null 2>&1; then
+	exec connect-proxy -S "$PROXY_ADDR" "$HOST" "$PORT"
+fi
+
+echo "No SOCKS-capable helper found (need nc, ncat, or connect-proxy)." >&2
+exit 1
+EOF
+	chmod 755 "$MIHOMO_SSH_PROXY_HELPER"
+}
+
+ssh_proxy_on_command() {
+	local port
+	require_host_integration_allowed
+	port="$(publish_port)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	mkdir -p "$MIHOMO_SSH_CONFIG_DIR"
+	write_ssh_proxy_helper
+	cat > "$MIHOMO_SSH_CONFIG_FILE" <<EOF
+Host $MIHOMO_SSH_PROXY_HOSTS
+    ProxyCommand env MIHOMO_SSH_PROXY_ADDR=127.0.0.1:$port $MIHOMO_SSH_PROXY_HELPER %h %p
+EOF
+	chmod 644 "$MIHOMO_SSH_CONFIG_FILE"
+	echo "OpenSSH proxy config enabled at $MIHOMO_SSH_CONFIG_FILE"
+}
+
+ssh_proxy_off_command() {
+	require_host_integration_allowed
+	rm -f "$MIHOMO_SSH_CONFIG_FILE"
+	rm -f "$MIHOMO_SSH_PROXY_HELPER"
+	echo "OpenSSH proxy config removed."
+}
+
+daemon_proxy_on_command() {
+	local port
+	local service file dir legacy
+	require_host_integration_allowed
+	require_cmd systemctl
+	port="$(publish_port)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	if [[ -z "$(managed_daemon_services)" ]]; then
+		log "No known daemon services found for proxy integration."
+	fi
+	for service in $(managed_daemon_services); do
+		dir="$(service_dropin_dir "$service")"
+		file="$(service_dropin_file "$service")"
+		mkdir -p "$dir"
+		for legacy in $MIHOMO_DAEMON_PROXY_LEGACY_DROPIN_NAMES; do
+			rm -f "${dir}/${legacy}"
+		done
+		cat > "$file" <<EOF
+# $MIHOMO_GENERATED_MARKER
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:$port"
+Environment="HTTPS_PROXY=http://127.0.0.1:$port"
+Environment="NO_PROXY=$MIHOMO_NO_PROXY"
+Environment="http_proxy=http://127.0.0.1:$port"
+Environment="https_proxy=http://127.0.0.1:$port"
+Environment="no_proxy=$MIHOMO_NO_PROXY"
+EOF
+	done
+	systemd_reload
+	for service in $(managed_daemon_services); do
+		systemctl restart "$service"
+	done
+	echo "Daemon proxy enabled for: $(managed_daemon_services | paste -sd ',' - 2>/dev/null || true)"
+}
+
+daemon_proxy_off_command() {
+	local service dir file legacy
+	require_host_integration_allowed
+	require_cmd systemctl
+	for service in $MIHOMO_DAEMON_PROXY_SERVICES; do
+		file="$(service_dropin_file "$service")"
+		dir="$(service_dropin_dir "$service")"
+		rm -f "$file"
+		for legacy in $MIHOMO_DAEMON_PROXY_LEGACY_DROPIN_NAMES; do
+			rm -f "${dir}/${legacy}"
+		done
+		if [[ -d "$dir" ]] && [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+			rmdir "$dir" 2>/dev/null || true
+		fi
+	done
+	systemd_reload
+	for service in $(managed_daemon_services); do
+		systemctl restart "$service"
+	done
+	echo "Daemon proxy disabled."
+}
+
+docker_build_proxy_strip_registry_mirrors() {
+	# Print $1 (a daemon.json) to stdout with the "registry-mirrors" key removed.
+	local input="$1"
+	if command -v jq >/dev/null 2>&1; then
+		jq 'del(.["registry-mirrors"])' "$input"
+	elif command -v python3 >/dev/null 2>&1; then
+		python3 - "$input" <<'PY'
+import json, sys
+with open(sys.argv[1]) as handle:
+    data = json.load(handle)
+if isinstance(data, dict):
+    data.pop("registry-mirrors", None)
+json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
+sys.stdout.write("\n")
+PY
+	else
+		return 1
+	fi
+}
+
+docker_build_proxy_on_command() {
+	require_host_integration_allowed
+	require_cmd systemctl
+	local port dir file daemon_json backup tmp
+	port="$(mixed_port_from_config)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	daemon_json="${MIHOMO_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
+	backup="${daemon_json}.qp-build-proxy.bak"
+
+	# 1. Proxy drop-in for docker.service ONLY, so containerd/k8s are not bounced.
+	#    Name it to sort LAST so it overrides any pre-existing default-proxy drop-in:
+	#    systemd applies drop-ins in filename order and the last assignment of a
+	#    variable wins, and Go/dockerd reads the upper-case HTTPS_PROXY first.
+	dir="$(service_dropin_dir docker.service)"
+	file="${dir}/${MIHOMO_DOCKER_BUILD_PROXY_DROPIN:-zzz-qp-tunnel-docker-build-proxy.conf}"
+	mkdir -p "$dir"
+	rm -f "${dir}/mihomo-build-proxy.conf"
+	cat > "$file" <<EOF
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:$port"
+Environment="HTTPS_PROXY=http://127.0.0.1:$port"
+Environment="NO_PROXY=$MIHOMO_NO_PROXY"
+Environment="http_proxy=http://127.0.0.1:$port"
+Environment="https_proxy=http://127.0.0.1:$port"
+Environment="no_proxy=$MIHOMO_NO_PROXY"
+EOF
+
+	# 2. Disable registry-mirrors so docker.io resolves directly through the proxy
+	#    instead of hitting China mirrors that get dragged oversea and time out.
+	if [[ -f "$daemon_json" ]]; then
+		[[ -f "$backup" ]] || cp "$daemon_json" "$backup"
+		tmp="$(mktemp)"
+		if docker_build_proxy_strip_registry_mirrors "$daemon_json" > "$tmp" && [[ -s "$tmp" ]]; then
+			mv "$tmp" "$daemon_json"
+			log "Disabled registry-mirrors in $daemon_json (backup: $backup)."
+		else
+			rm -f "$tmp"
+			die "Could not edit $daemon_json; install jq or python3, or remove registry-mirrors manually."
+		fi
+	fi
+
+	systemd_reload
+	systemctl restart docker.service
+	echo "docker-build-proxy ON: docker.service pulls images via http://127.0.0.1:$port; registry-mirrors disabled."
+	echo "Note: build RUN steps (npm/pip/...) still need a reachable registry (e.g. a China mirror). Undo with: docker-build-proxy off"
+}
+
+docker_build_proxy_off_command() {
+	require_host_integration_allowed
+	require_cmd systemctl
+	local dir file daemon_json backup
+	daemon_json="${MIHOMO_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
+	backup="${daemon_json}.qp-build-proxy.bak"
+
+	dir="$(service_dropin_dir docker.service)"
+	file="${dir}/${MIHOMO_DOCKER_BUILD_PROXY_DROPIN:-zzz-qp-tunnel-docker-build-proxy.conf}"
+	rm -f "$file" "${dir}/mihomo-build-proxy.conf"
+	if [[ -d "$dir" ]] && [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+		rmdir "$dir" 2>/dev/null || true
+	fi
+
+	if [[ -f "$backup" ]]; then
+		mv "$backup" "$daemon_json"
+		log "Restored $daemon_json from backup (registry-mirrors back)."
+	fi
+
+	systemd_reload
+	systemctl restart docker.service
+	echo "docker-build-proxy OFF: docker.service proxy drop-in removed and registry-mirrors restored."
+}
+
+tun_on_command() {
+	require_host_integration_allowed
+	write_tun_overlay
+	render_runtime_config
+	proxy_on_command
+	ssh_proxy_on_command
+	daemon_proxy_on_command
+	if service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+		systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+		echo "Mihomo TUN mode enabled, persisted, and service restarted."
+	else
+		systemctl start "$MIHOMO_SERVICE_NAME"
+		systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+		echo "Mihomo TUN mode enabled, persisted, and service started."
+	fi
+}
+
+tun_off_command() {
+	require_host_integration_allowed
+	remove_tun_overlay
+	render_runtime_config
+	proxy_off_command
+	ssh_proxy_off_command
+	daemon_proxy_off_command
+	if service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+		echo "Mihomo TUN mode disabled and service restarted."
+	else
+		echo "Mihomo TUN mode disabled."
+	fi
+}
+
+server_on_command() {
+	local was_tun_enabled="false"
+	require_host_integration_allowed
+	if tun_enabled; then
+		was_tun_enabled="true"
+		remove_tun_overlay
+	fi
+	render_runtime_config
+	if service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+	else
+		systemctl start "$MIHOMO_SERVICE_NAME"
+	fi
+	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+	proxy_on_command
+	ssh_proxy_on_command
+	daemon_proxy_on_command
+	echo "Server-safe outbound proxy mode enabled."
+	echo "Mihomo stays resident as a local proxy; TUN mode is disabled so public inbound services keep their normal return path."
+}
+
+server_off_command() {
+	local can_render="false"
+	require_host_integration_allowed
+
+	remove_tun_overlay
+	if [[ -f "$MIHOMO_SUBSCRIPTION_FILE" || -f "$MIHOMO_CONFIG_FILE" ]]; then
+		render_runtime_config
+		can_render="true"
+	fi
+	proxy_off_command
+	ssh_proxy_off_command
+	daemon_proxy_off_command
+	if [[ "$can_render" == "true" ]] && service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+	fi
+	echo "Server-safe outbound proxy integrations disabled. Mihomo service remains installed."
+}
+
+run_command() {
+	local port host_proxy host_socks_proxy container_host container_proxy
+	[[ $# -gt 0 ]] || die "Usage: sudo bash ./scripts/mihomo-client.sh run <command> [args...]"
+	port="$(mixed_port_from_config)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	host_proxy="http://127.0.0.1:$port"
+	host_socks_proxy="socks5://127.0.0.1:$port"
+	container_host="${QP_TUNNEL_CONTAINER_HOST:-host.docker.internal}"
+	container_proxy="http://${container_host}:$port"
+	http_proxy="$host_proxy" \
+	https_proxy="$host_proxy" \
+	HTTP_PROXY="$host_proxy" \
+	HTTPS_PROXY="$host_proxy" \
+	all_proxy="$host_socks_proxy" \
+	ALL_PROXY="$host_socks_proxy" \
+	no_proxy="$MIHOMO_NO_PROXY" \
+	NO_PROXY="$MIHOMO_NO_PROXY" \
+	QP_TUNNEL_MIXED_PORT="$port" \
+	QP_TUNNEL_HOST_HTTP_PROXY="$host_proxy" \
+	QP_TUNNEL_HOST_HTTPS_PROXY="$host_proxy" \
+	QP_TUNNEL_HOST_ALL_PROXY="$host_socks_proxy" \
+	QP_TUNNEL_CONTAINER_HTTP_PROXY="$container_proxy" \
+	QP_TUNNEL_CONTAINER_HTTPS_PROXY="$container_proxy" \
+	QP_TUNNEL_CONTAINER_NO_PROXY="$MIHOMO_NO_PROXY" \
+	CONTAINER_HTTP_PROXY="$container_proxy" \
+	CONTAINER_HTTPS_PROXY="$container_proxy" \
+	CONTAINER_NO_PROXY="$MIHOMO_NO_PROXY" \
+	BUILD_CONTAINER_HTTP_PROXY="$container_proxy" \
+	BUILD_CONTAINER_HTTPS_PROXY="$container_proxy" \
+	BUILD_CONTAINER_NO_PROXY="$MIHOMO_NO_PROXY" \
+	MARKET_CONTAINER_HTTP_PROXY="${MARKET_CONTAINER_HTTP_PROXY:-$container_proxy}" \
+	MARKET_CONTAINER_HTTPS_PROXY="${MARKET_CONTAINER_HTTPS_PROXY:-$container_proxy}" \
+	MARKET_CONTAINER_NO_PROXY="${MARKET_CONTAINER_NO_PROXY:-$MIHOMO_NO_PROXY}" \
+	"$@"
+}
+
+test_command() {
+	local url="${1:-https://www.google.com/generate_204}"
+	local port
+	port="$(mixed_port_from_config)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	require_cmd curl
+	echo "Testing through local mixed-port $port -> $url"
+	curl -I --proxy "http://127.0.0.1:$port" --max-time 15 "$url"
+}
+
+install_command() {
+	local url="${1:-}"
+	local username="${2:-}"
+	local password="${3:-}"
+	local version="${4:-latest}"
+	local autostart="${5:-true}"
+	local binary_path="${6:-}"
+	local file_path="${7:-}"
+	local no_auth="${8:-false}"
+	local mixed_port="${9:-}"
+	local node="${10:-}"
+	local -a normalized=()
+
+	if [[ -n "$mixed_port" ]]; then
+		validate_mixed_port "$mixed_port"
+		if port_held_by_other_process "$mixed_port"; then
+			die "Port $mixed_port is already held by another process. Pick a free port so instances do not collide."
+		fi
+	elif [[ "$MIHOMO_INSTANCE" != "default" ]] \
+		&& ! grep -q '^MIHOMO_MIXED_PORT=' "$MIHOMO_ENV_FILE" 2>/dev/null; then
+		die "The first install of named instance '$MIHOMO_INSTANCE' requires --mixed-port PORT."
+	fi
+
+	ensure_dirs
+	load_env
+	if [[ -n "$mixed_port" ]]; then
+		set_env_value MIHOMO_MIXED_PORT "$mixed_port"
+		MIHOMO_MIXED_PORT="$mixed_port"
+	fi
+	log "Starting Mihomo client install/setup"
+
+	if [[ -z "$file_path" && -z "$url" ]]; then
+		url="$(prompt_default "Subscription URL" "${MIHOMO_SUBSCRIPTION_URL:-}")"
+	fi
+	if [[ -z "$file_path" ]]; then
+		mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
+		url="${normalized[0]}"
+		username="${normalized[1]}"
+		password="${normalized[2]}"
+		if [[ "$no_auth" == "true" ]]; then
+			username=""
+			password=""
+		fi
+		if [[ "$no_auth" != "true" && -z "$username" ]]; then
+			username="$(prompt_default "Subscription username (empty if none)" "${MIHOMO_SUBSCRIPTION_USER:-}")"
+		fi
+		if [[ "$no_auth" != "true" && -z "$password" ]]; then
+			password="$(prompt_password "Subscription password (empty if none)")"
+		fi
+	fi
+
+	if [[ -n "$binary_path" ]]; then
+		log "Installing Mihomo core from local binary path"
+		install_binary_from_path "$binary_path"
+	else
+		log "Installing Mihomo core binary"
+		install_binary "$version"
+	fi
+	log "Installing global mihomo-client launcher"
+	install_client_launcher
+	log "Writing systemd service file"
+	write_service_file
+	systemd_reload
+
+	set_env_value MIHOMO_SUBSCRIPTION_URL "$url"
+	set_env_value MIHOMO_SUBSCRIPTION_USER "$username"
+	set_env_value MIHOMO_SUBSCRIPTION_PASSWORD "$password"
+
+	log "Installing initial subscription and rendering runtime config"
+	update_subscription_command "$url" "$username" "$password" "$file_path" "$no_auth" "$node"
+
+	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+	if [[ "$autostart" == "true" ]]; then
+		log "Starting Mihomo client service"
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+		echo "Mihomo client installed and started."
+	else
+		echo "Mihomo client installed. Service not started because --no-start was used."
+	fi
+}
+
+upgrade_systemd_command() {
+	ensure_dirs
+	load_env
+	log "Installing current mihomo-client launcher"
+	install_client_launcher
+	log "Refreshing systemd service file"
+	write_service_file
+	systemd_reload
+	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+	if service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+		echo "Mihomo client systemd unit updated and service restarted."
+	else
+		echo "Mihomo client systemd unit updated. Start it with: systemctl start $MIHOMO_SERVICE_NAME"
+	fi
+}
+
+# systemd can report a unit as active while mihomo failed to bind its port,
+# because another instance already owns it. Without this, a dead proxy port hides
+# behind "active (running)" indefinitely.
+mixed_port_listener_line() {
+	local port="${1:-}"
+	[[ -n "$port" ]] || return 0
+	command -v ss >/dev/null 2>&1 || return 0
+	# Deliberately no `exit` in awk: quitting early makes ss die of SIGPIPE, and
+	# under `set -o pipefail` that non-zero status would abort the whole script.
+	ss -lntp 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") && !seen { print; seen = 1 }' || true
+	return 0
+}
+
+# Always succeeds; prints nothing when there is no live main PID. A bare
+# `[[ ... ]] && printf` would make the function return 1, which `set -e` turns
+# into an abort at the caller's assignment.
+service_main_pid() {
+	local pid
+	pid="$(systemctl show -p MainPID --value "$MIHOMO_SERVICE_NAME" 2>/dev/null || true)"
+	if [[ -n "$pid" && "$pid" != "0" ]]; then
+		printf '%s' "$pid"
+	fi
+	return 0
+}
+
+# True only when someone *else* holds the port; this instance already owning it
+# is a no-op, not a conflict.
+port_held_by_other_process() {
+	local port="$1"
+	local listener pid
+	listener="$(mixed_port_listener_line "$port")"
+	[[ -n "$listener" ]] || return 1
+	pid="$(service_main_pid)"
+	[[ -n "$pid" && "$listener" == *"pid=$pid,"* ]] && return 1
+	return 0
+}
+
+report_mixed_port_binding() {
+	local port="${1:-}"
+	local listener pid
+	if [[ -z "$port" ]]; then
+		echo "Mixed port listener: unknown"
+		return 0
+	fi
+	if ! command -v ss >/dev/null 2>&1; then
+		echo "Mixed port listener: unknown (ss unavailable)"
+		return 0
+	fi
+	listener="$(mixed_port_listener_line "$port")"
+	if [[ -z "$listener" ]]; then
+		echo "Mixed port listener: NOTHING is listening on $port"
+		[[ -n "$(service_main_pid)" ]] \
+			&& echo "  The unit is running but its proxy port is not served. Check the journal, or move it with: port <N>"
+		return 0
+	fi
+	pid="$(service_main_pid)"
+	if [[ -n "$pid" && "$listener" == *"pid=$pid,"* ]]; then
+		echo "Mixed port listener: this service (pid $pid)"
+	else
+		echo "Mixed port listener: ANOTHER process holds $port"
+		echo "  ${listener##*users:}"
+		echo "  This instance is not serving its own port. Give it a free one with: port <N>"
+	fi
+}
+
+# Every instance this script generates carries the same unit description, so
+# siblings can be found without guessing names. Two instances configured for one
+# port look healthy in systemd while only the first to start actually binds it,
+# which is why this is surfaced here. Read-only: it reports, never reconfigures
+# another instance.
+report_sibling_instances() {
+	local port="${1:-}"
+	local unit config name sibling_port
+	local -a conflicts=()
+	local -a others=()
+
+	for unit in /etc/systemd/system/*.service; do
+		[[ -f "$unit" ]] || continue
+		[[ "$unit" == "$MIHOMO_SERVICE_FILE" ]] && continue
+		grep -q '^Description=Mihomo Client$' "$unit" 2>/dev/null || continue
+		name="$(basename "$unit")"
+		config="$(awk '/^ExecStart=/ { for (i = 1; i < NF; i++) if ($i == "-f") { print $(i + 1); exit } }' "$unit")"
+		sibling_port=""
+		if [[ -n "$config" && -f "$config" ]]; then
+			sibling_port="$(awk -F: '/^[[:space:]]*mixed-port[[:space:]]*:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$config")"
+		fi
+		if [[ -n "$port" && -n "$sibling_port" && "$sibling_port" == "$port" ]]; then
+			conflicts+=("$name (mixed-port $sibling_port)")
+		else
+			others+=("$name (mixed-port ${sibling_port:-unknown})")
+		fi
+	done
+
+	[[ "${#conflicts[@]}" -gt 0 || "${#others[@]}" -gt 0 ]] || return 0
+	echo "Other Mihomo instances on this host:"
+	[[ "${#others[@]}" -gt 0 ]] && printf '  %s\n' "${others[@]}"
+	if [[ "${#conflicts[@]}" -gt 0 ]]; then
+		printf '  %s  <-- SAME PORT as this instance\n' "${conflicts[@]}"
+		echo "  Only one process can bind a port; the other stays 'active' without serving it."
+		echo "  Give one of them a free port (this instance: port <N>; another: use its own launcher)."
+	fi
+}
+
+# Regenerate only the integrations that are currently switched on. The generated
+# files embed the mixed port and the script's own layout, so a version upgrade or
+# a port change must reach them; anything currently off stays off.
+refresh_active_integrations() {
+	local service
+	local daemon_active=false
+	case "$MIHOMO_EXPLICIT_USE_ONLY" in
+		1|true|TRUE|yes|YES|on|ON)
+			return 0
+		;;
+	esac
+	if [[ -f "$MIHOMO_PROFILE_PROXY_FILE" ]]; then
+		proxy_on_command >/dev/null
+		echo "  refreshed shell profile: $MIHOMO_PROFILE_PROXY_FILE"
+	fi
+	for service in $(managed_daemon_services); do
+		[[ -f "$(service_dropin_file "$service")" ]] && daemon_active=true
+	done
+	if [[ "$daemon_active" == true ]]; then
+		daemon_proxy_on_command >/dev/null
+		echo "  refreshed daemon proxy drop-ins (managed daemons restarted)"
+	fi
+	if [[ -f "$MIHOMO_SSH_CONFIG_FILE" ]]; then
+		ssh_proxy_on_command >/dev/null
+		echo "  refreshed SSH proxy config"
+	fi
+}
+
+# Publish or withdraw the system-wide proxy wiring, independently of the tunnel
+# itself. egress-on/off also re-render the config and restart Mihomo (and the
+# managed daemons), which is heavy when the only intent is "should this host use
+# a proxy right now". `listen` leaves the running tunnel alone.
+#
+# The port is free-form on purpose: `listen on 7788` points the host at this
+# tunnel, while `listen on 7890` points it at a separate proxy without this tool
+# having to own that one.
+listen_command() {
+	local action="${1:-}"
+	local port="${2:-}"
+
+	case "$action" in
+		on)
+			require_host_integration_allowed
+			if [[ -n "$port" ]]; then
+				validate_mixed_port "$port"
+			fi
+			load_env
+			if [[ -z "$port" ]]; then
+				port="$(mixed_port_from_config || true)"
+				[[ -n "$port" ]] || die "No mixed port configured yet; run install first or pass a port."
+			fi
+			set_env_value MIHOMO_PUBLISH_PORT "$port"
+			MIHOMO_PUBLISH_PORT="$port"
+			proxy_on_command >/dev/null
+			ssh_proxy_on_command >/dev/null
+			daemon_proxy_on_command >/dev/null
+			echo "Listening wiring published at 127.0.0.1:${port}."
+			echo "  shell profile : $MIHOMO_PROFILE_PROXY_FILE"
+			echo "  ssh config    : $MIHOMO_SSH_CONFIG_FILE"
+			echo "  daemons       : $(managed_daemon_services | paste -sd ',' - 2>/dev/null || true)"
+			echo "The Mihomo service was not touched. Open a new shell or run: source $MIHOMO_PROFILE_PROXY_FILE"
+			if [[ -z "$(mixed_port_listener_line "$port")" ]]; then
+				echo "Warning: nothing is listening on ${port} right now, so proxied clients will fail until something does."
+			fi
+			;;
+		off)
+			require_host_integration_allowed
+			load_env
+			proxy_off_command
+			ssh_proxy_off_command
+			daemon_proxy_off_command
+			set_env_value MIHOMO_PUBLISH_PORT ""
+			echo "Listening wiring withdrawn. The Mihomo service keeps running and stays usable explicitly:"
+			echo "  curl -x http://127.0.0.1:$(mixed_port_from_config || echo '<port>') https://example.com"
+			;;
+		status|"")
+			load_env
+			local target
+			target="$(publish_port || true)"
+			echo "Tunnel listener port : $(mixed_port_from_config || echo unknown)"
+			echo "Published to system  : ${MIHOMO_PUBLISH_PORT:-not published}"
+			echo "Effective wiring port: ${target:-unknown}"
+			echo "  shell profile : $([[ -f "$MIHOMO_PROFILE_PROXY_FILE" ]] && echo on || echo off)"
+			echo "  ssh config    : $([[ -f "$MIHOMO_SSH_CONFIG_FILE" ]] && echo on || echo off)"
+			echo "  daemons       : $(managed_daemon_services_with_proxy | paste -sd ',' - 2>/dev/null || echo none)"
+			;;
+		*)
+			die "Usage: listen on [PORT] | listen off | listen status"
+			;;
+	esac
+}
+
+# One command to re-apply everything after the package is updated, instead of
+# remembering install-script + upgrade-systemd + re-enabling each integration.
+reload_command() {
+	ensure_dirs
+	load_env
+	log "Installing current mihomo-client launcher"
+	install_client_launcher
+	log "Refreshing systemd service file"
+	write_service_file
+	systemd_reload
+	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+	if [[ -f "$MIHOMO_SUBSCRIPTION_FILE" ]]; then
+		log "Re-rendering runtime config from the saved subscription"
+		render_runtime_config
+	fi
+	refresh_active_integrations
+	if service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+		echo "Reload complete: launcher, systemd unit, runtime config and enabled integrations. Service restarted."
+	else
+		echo "Reload complete. Start it with: systemctl start $MIHOMO_SERVICE_NAME"
+	fi
+}
+
+# Change this instance's local mixed port. Instances are namespaced by the
+# MIHOMO_* variables, so several can coexist as long as their ports differ.
+port_command() {
+	local port="${1:-}"
+	validate_mixed_port "$port"
+	ensure_dirs
+	load_env
+	local previous="${MIHOMO_MIXED_PORT:-unset}"
+	if port_held_by_other_process "$port"; then
+		die "Port $port is already held by another process. Pick a free port so instances do not collide."
+	fi
+	set_env_value MIHOMO_MIXED_PORT "$port"
+	MIHOMO_MIXED_PORT="$port"
+	if [[ -f "$MIHOMO_SUBSCRIPTION_FILE" ]]; then
+		render_runtime_config
+	else
+		log "No subscription yet; the port is saved and applied on the next install/update."
+	fi
+	refresh_active_integrations
+	if service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+	fi
+	echo "Mixed port set to ${port} (was ${previous})."
+	echo "Shells that exported the old port must run: eval \"\$(qp-tunnel-cli print-unset-env)\""
+}
+
+start_command() {
+	[[ "$MIHOMO_INSTANCE" != "subscriptions" ]] || load_env
+	systemctl start "$MIHOMO_SERVICE_NAME"
+}
+
+stop_command() {
+	systemctl stop "$MIHOMO_SERVICE_NAME"
+}
+
+restart_command() {
+	[[ "$MIHOMO_INSTANCE" != "subscriptions" ]] || load_env
+	systemctl restart "$MIHOMO_SERVICE_NAME"
+}
+
+enable_command() {
+	[[ "$MIHOMO_INSTANCE" != "subscriptions" ]] || load_env
+	systemctl enable "$MIHOMO_SERVICE_NAME"
+}
+
+disable_command() {
+	systemctl disable "$MIHOMO_SERVICE_NAME"
+}
+
+uninstall_command() {
+	local purge="${1:-false}"
+	systemctl disable --now "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+	rm -f "$MIHOMO_SERVICE_FILE"
+	rm -f "$MIHOMO_PROFILE_PROXY_FILE"
+	rm -f "$MIHOMO_TUN_OVERLAY_FILE"
+	rm -f "$MIHOMO_SSH_CONFIG_FILE"
+	rm -f "$MIHOMO_SSH_PROXY_HELPER"
+	rm -f "$MIHOMO_CLIENT_LAUNCHER"
+	systemd_reload
+
+	if [[ "$purge" == "true" ]]; then
+		rm -f "$MIHOMO_BIN"
+		rm -rf "$MIHOMO_HOME"
+	fi
+
+	echo "Mihomo client service removed."
+	if [[ "$purge" == "true" ]]; then
+		echo "Binary and client state purged."
+	fi
+}
+
+main() {
+	local command="${1:-help}"
+
+	if [[ "${1:-}" == "--verbose" ]]; then
+		enable_verbose
+		shift
+		command="${1:-help}"
+	fi
+
+	shift || true
+
+	if [[ "$command" == "help" || "$command" == "-h" || "$command" == "--help" ]]; then
+		usage
+		exit 0
+	fi
+
+	# Emits static text only. It must stay usable without root because the whole
+	# point is `eval "$(... print-unset-env)"` inside an ordinary shell.
+	if [[ "$command" == "print-unset-env" ]]; then
+		print_unset_env_command
+		exit 0
+	fi
+
+	require_root
+	require_cmd systemctl
+
+	case "$command" in
+		setup)
+			install_command "" "" "" "latest" "true"
+		;;
+		install)
+			local url=""
+			local username=""
+			local password=""
+			local version="latest"
+			local autostart="true"
+			local binary_path=""
+			local file_path=""
+			local no_auth="false"
+			local mixed_port=""
+			local node=""
+			local url_arg_provided="false"
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+					--url) url="$2"; url_arg_provided="true"; shift 2 ;;
+					--file) file_path="$2"; shift 2 ;;
+					--user) username="$2"; shift 2 ;;
+					--password) password="$2"; shift 2 ;;
+					--no-auth) no_auth="true"; shift ;;
+					--version) version="$2"; shift 2 ;;
+					--binary-path) binary_path="$2"; shift 2 ;;
+					--mixed-port)
+						[[ $# -ge 2 ]] || die "Missing value for --mixed-port."
+						mixed_port="$2"
+						shift 2
+					;;
+					--no-start) autostart="false"; shift ;;
+					--node) [[ $# -ge 2 && -n "$2" ]] || die "Missing value for --node."; node="$2"; shift 2 ;;
+					*) die "Unknown install option: $1" ;;
+				esac
+			done
+			if [[ "$url_arg_provided" == "true" && "$no_auth" != "true" && -z "$username" && -z "$password" ]] && ! url_has_userinfo "$url"; then
+				no_auth="true"
+			fi
+			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path" "$file_path" "$no_auth" "$mixed_port" "$node"
+		;;
+		update-subscription)
+			local url=""
+			local username=""
+			local password=""
+			local file_path=""
+			local no_auth="false"
+			local node=""
+			local url_arg_provided="false"
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+					--url) url="$2"; url_arg_provided="true"; shift 2 ;;
+					--file) file_path="$2"; shift 2 ;;
+					--user) username="$2"; shift 2 ;;
+					--password) password="$2"; shift 2 ;;
+					--no-auth) no_auth="true"; shift ;;
+					--node) [[ $# -ge 2 && -n "$2" ]] || die "Missing value for --node."; node="$2"; shift 2 ;;
+					*) die "Unknown update-subscription option: $1" ;;
+				esac
+			done
+			if [[ "$url_arg_provided" == "true" && "$no_auth" != "true" && -z "$username" && -z "$password" ]] && ! url_has_userinfo "$url"; then
+				no_auth="true"
+			fi
+			update_subscription_command "$url" "$username" "$password" "$file_path" "$no_auth" "$node"
+		;;
+		start)
+			start_command
+		;;
+		stop)
+			stop_command
+		;;
+		restart)
+			restart_command
+		;;
+		status)
+			status_command
+		;;
+		logs)
+			logs_command
+		;;
+		enable)
+			enable_command
+		;;
+		disable)
+			disable_command
+		;;
+		upgrade-systemd)
+			upgrade_systemd_command
+		;;
+		listen)
+			listen_command "${1:-}" "${2:-}"
+		;;
+		reload)
+			reload_command
+		;;
+		port)
+			port_command "${1:-}"
+		;;
+		server-on|egress-on)
+			server_on_command
+		;;
+		server-off|egress-off)
+			server_off_command
+		;;
+		proxy-on)
+			proxy_on_command
+		;;
+		proxy-off)
+			proxy_off_command
+		;;
+		tun-on)
+			tun_on_command
+		;;
+		tun-off)
+			tun_off_command
+		;;
+		ssh-proxy-on)
+			ssh_proxy_on_command
+		;;
+		ssh-proxy-off)
+			ssh_proxy_off_command
+		;;
+		daemon-proxy-on)
+			daemon_proxy_on_command
+		;;
+		daemon-proxy-off)
+			daemon_proxy_off_command
+		;;
+		docker-proxy-on)
+			daemon_proxy_on_command
+		;;
+		docker-proxy-off)
+			daemon_proxy_off_command
+		;;
+		docker-build-proxy)
+			case "${1:-}" in
+				on) docker_build_proxy_on_command ;;
+				off) docker_build_proxy_off_command ;;
+				*) die "Usage: docker-build-proxy on|off" ;;
+			esac
+		;;
+		run)
+			run_command "$@"
+		;;
+		test)
+			local url="https://www.google.com/generate_204"
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+					--url) url="$2"; shift 2 ;;
+					*) die "Unknown test option: $1" ;;
+				esac
+			done
+			test_command "$url"
+		;;
+		print-unset-env)
+			print_unset_env_command
+		;;
+		print-env)
+			print_env_command
+		;;
+		uninstall)
+			local purge="false"
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+					--purge) purge="true"; shift ;;
+					*) die "Unknown uninstall option: $1" ;;
+				esac
+			done
+			uninstall_command "$purge"
+		;;
+		*)
+			die "Unknown command: $command"
+		;;
+	esac
+}
+
+main "$@"

@@ -1,0 +1,793 @@
+<!doctype html>
+<html lang="zh-CN" class="qp-theme-neon-void-light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src http: https:; script-src 'self'; style-src 'self';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MX Launcher</title>
+    <script src="./theme.js"></script>
+    <link rel="stylesheet" href="./ui-design/styles.css" />
+    <link rel="stylesheet" href="./ui-design/select.css" />
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./neon-void.css" />
+    <link rel="stylesheet" href="./identity-applications.css" />
+  </head>
+  <body class="qp-app is-locked">
+    <section id="login-gate" class="login-gate" aria-labelledby="gate-title">
+      <button class="shell-icon-button theme-toggle login-theme-toggle" type="button" data-theme-toggle aria-label="切换到深色模式" title="切换到深色模式">
+              <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z" /></svg>
+              <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></svg>
+            </button>
+      <div class="login-card">
+        <div class="brand"><div class="brand-mark">MX</div><div><h1>MX Launcher</h1><p>统一管理工作台</p></div></div>
+        <h2 id="gate-title">登录管理工作台</h2>
+        <div id="gate-account" class="login-identity" hidden>
+          <span id="gate-avatar" class="login-avatar" aria-hidden="true"></span>
+          <div class="login-identity-copy"><span>当前账号</span><strong id="gate-account-name"></strong><small id="gate-account-login"></small></div>
+          <span class="login-identity-state">已登录</span>
+        </div>
+        <p id="gate-status" class="login-intro" role="status">正在验证登录状态…</p>
+        <button id="gate-login" class="primary-button login-primary" type="button" disabled>统一账号登录</button>
+        <div class="login-account-actions">
+          <button id="gate-switch" class="login-text-button" type="button">选择其他账号</button>
+          <button id="gate-refresh" class="login-text-button" type="button" hidden>刷新权限</button>
+          <button id="gate-signout" class="login-text-button" type="button" hidden>退出 Launcher</button>
+        </div>
+        <details class="login-alternative">
+          <summary>使用 Internal Ops Token</summary>
+          <form id="gate-token-form">
+            <label id="gate-server-field">MX Server<input id="gate-server" type="url" autocomplete="url" /></label>
+            <label>Internal Ops Token<input id="gate-token" type="password" autocomplete="off" required /></label>
+            <p id="gate-token-error" role="alert"></p>
+            <button class="secondary-button" type="submit">验证并进入</button>
+          </form>
+        </details>
+        <footer>MX Launcher · 管理工作台</footer>
+      </div>
+    </section>
+      <dialog id="admin-account-link" class="admin-account-dialog" aria-labelledby="admin-account-link-title">
+        <form id="admin-account-link-form">
+          <span class="site-kind">MX ACCOUNT</span>
+          <h2 id="admin-account-link-title">关联已有 MX 账号</h2>
+          <p>统一登录已验证。再验证一次已有 MX 账号，后续即可使用个人登录进入。原用户、权限和联网配置保持不变。</p>
+          <label>已有账号<input name="login" required maxlength="255" autocomplete="username" /></label>
+          <label>账号密码<input name="password" type="password" required maxlength="1024" autocomplete="current-password" /></label>
+          <p class="admin-account-hint">仅支持已有密码账号。只有飞书登录的账号将在飞书接入阶段支持关联。</p>
+          <p id="admin-account-link-feedback" role="status" aria-live="polite"></p>
+          <a href="/auth/admin/login">重新验证统一登录</a>
+          <div class="admin-account-actions">
+            <button id="admin-account-link-cancel" type="button" class="secondary-button">稍后处理</button>
+            <button type="submit" class="primary-button">验证并关联</button>
+          </div>
+        </form>
+      </dialog>
+    <main class="shell" inert>
+      <aside id="sidebar" class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">MX</div>
+          <div>
+            <h1>MX Launcher</h1>
+            <p>Internal · 管理工作台</p>
+          </div>
+        </div>
+
+        <nav class="nav-tabs" aria-label="管理导航">
+          <section class="nav-group is-active" aria-label="工作台">
+            <button id="tab-workbench" class="nav-tab is-active" type="button" data-view="workbench" data-short="首页">
+              <strong>工作台</strong>
+              <span>常用任务与中心入口</span>
+            </button>
+          </section>
+          <p class="nav-category">业务与访问</p>
+          <section id="nav-group-apps" class="nav-group is-group-collapsed" aria-label="应用与工作空间" data-nav-group="apps">
+            <button id="app-nav-toggle" class="nav-group-title nav-group-toggle" type="button" aria-expanded="false" aria-controls="app-nav-tree">
+              <span>
+                <strong>应用与工作空间</strong>
+                <small>产品目录与应用管理</small>
+              </span>
+              <b aria-hidden="true">⌄</b>
+            </button>
+            <div id="app-nav-tree" class="nav-tree" hidden>
+              <button id="tab-mx-h2i" class="nav-tab" type="button" data-view="app-center" data-app-node="mx-h2i" data-short="H2I">
+                <strong>MX-H2I</strong>
+                <span>VPN / standalone launcher</span>
+              </button>
+              <button id="tab-app-center" class="nav-tab" type="button" data-view="app-center" data-app-node="appcenter" data-short="App">
+                <strong>AppCenter</strong>
+                <span>embed launcher host</span>
+              </button>
+              <button id="tab-h2o" class="nav-tab" type="button" data-view="app-center" data-app-node="h2o" data-short="H2O">
+                <strong>H2O</strong>
+                <span>embed launcher app</span>
+              </button>
+            </div>
+          </section>
+          <section id="nav-group-members" class="nav-group admin-nav-group is-group-collapsed" aria-label="成员与访问" data-nav-group="members">
+            <button id="tab-members" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="user-center" data-short="成员" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>成员与访问</strong>
+                <span>账号、角色与权限</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+          <section id="nav-group-mx-h2i-dashboard" class="nav-group mx-h2i-dashboard-nav-group" aria-label="网络与设备">
+            <button id="tab-mx-h2i-dashboard" class="nav-tab mx-h2i-dashboard-nav" type="button" data-view="app-center" data-app-node="mx-h2i" data-app-surface="dashboard" data-short="网络">
+              <strong>网络与设备</strong>
+              <span>Launcher Network · 连接与策略</span>
+            </button>
+          </section>
+          <p class="nav-category">交付与运行</p>
+          <section id="nav-group-releases" class="nav-group admin-nav-group is-group-collapsed" aria-label="发布与交付" data-nav-group="releases">
+            <button id="tab-releases" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="release" data-short="发布" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>发布与交付</strong>
+                <span>版本、灰度与发布门禁</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+          <section id="nav-group-operations" class="nav-group admin-nav-group is-group-collapsed" aria-label="运行与维护" data-nav-group="operations">
+            <button id="tab-admin" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview" data-short="运维" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>运行与维护</strong>
+                <span>站点、部署与运行状态</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+          <section id="nav-group-evidence" class="nav-group admin-nav-group is-group-collapsed" aria-label="日志与记录" data-nav-group="evidence">
+            <button id="tab-evidence" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="overview" data-short="记录" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>日志与记录</strong>
+                <span>执行、审计与回滚证据</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+          <p class="nav-category">平台管理</p>
+          <section id="nav-group-internal" class="nav-group admin-nav-group is-group-collapsed" aria-label="平台设置" data-nav-group="settings">
+            <button id="tab-internal" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="overview" data-short="设置" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>平台设置</strong>
+                <span>配置、DNS 与接入契约</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+        </nav>
+
+        <nav id="admin-subnav" class="admin-module-nav sidebar-admin-nav" aria-label="Admin modules" hidden>
+          <div class="admin-module-title">
+            <div>
+              <span id="admin-subnav-kicker">Operations</span>
+              <strong id="admin-subnav-title">H/D/I/O</strong>
+            </div>
+          </div>
+          <div id="admin-subnav-items" class="admin-subnav-items">
+            <button class="admin-module-tab" type="button" data-admin-menu="operations" data-admin-section="services" data-admin-subsection="services">
+              <strong>服务与部署</strong>
+              <span>服务操作、命令与任务记录</span>
+            </button>
+            <button class="admin-module-tab is-active" type="button" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview">
+              <strong>Dashboard</strong>
+              <span>拓扑、状态、全局进度</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="operations" data-admin-section="deployment" data-admin-subsection="oversea" data-deployment-kind="oversea">
+              <strong>Oversea</strong>
+              <span>远程接入节点</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="operations" data-admin-section="deployment" data-admin-subsection="domestic" data-deployment-kind="domestic">
+              <strong>Domestic</strong>
+              <span>WG / H2I relay</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="operations" data-admin-section="deployment" data-admin-subsection="internal" data-deployment-kind="internal">
+              <strong>Internal</strong>
+              <span>service peer / host runner</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="overview" hidden>
+              <strong>Overview</strong>
+              <span>Internal 控制面总览</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="user-center" hidden>
+              <strong>用户与账号</strong>
+              <span>用户、服务账号、设备身份</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="rbac" hidden>
+              <strong>角色与权限</strong>
+              <span>角色、权限、审批边界</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="identity-applications" hidden>
+              <strong>统一认证</strong>
+              <span>接入应用、可信域名与回调</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="config-center" hidden>
+              <strong>Config Center</strong>
+              <span>SSH Profile / policy / snapshot</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="awx-provider" hidden>
+              <strong>AWX Provider · 兼容</strong>
+              <span>inventory / credential / template</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="dns" hidden>
+              <strong>DNS</strong>
+              <span>CoreDNS authority / split DNS</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="mihomo" hidden>
+              <strong>Mihomo Authority</strong>
+              <span>订阅源与外网访问策略</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="release" hidden>
+              <strong>版本与灰度</strong>
+              <span>artifact、灰度、回滚</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="e2e-gate" hidden>
+              <strong>E2E Gate</strong>
+              <span>自动化测试与发布门禁</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="observability" hidden>
+              <strong>Observability</strong>
+              <span>trace / log / metric / evidence</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="admin-runner" hidden>
+              <strong>Admin / Runner</strong>
+              <span>Action Gates / worker job</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="sdk-gateway" hidden>
+              <strong>SDK Gateway</strong>
+              <span>Launcher / AppCenter SDK 契约</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="overview" hidden>
+              <strong>Overview</strong>
+              <span>全部证据流水线</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="executions" hidden>
+              <strong>Execution</strong>
+              <span>preflight / apply / rollback</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="runner-sessions" hidden>
+              <strong>Runner Sessions</strong>
+              <span>remote SSH / AWX runner</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="worker-jobs" hidden>
+              <strong>Worker Jobs</strong>
+              <span>job handoff / queue / gate</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="worker-reports" hidden>
+              <strong>Worker Reports</strong>
+              <span>artifact dry run / stdout / stderr</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="rollback" hidden>
+              <strong>Rollback</strong>
+              <span>回滚执行与报告</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="audit-log" hidden>
+              <strong>Audit / Logs</strong>
+              <span>审计、日志、操作证据</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="release-gate" hidden>
+              <strong>Release Gate</strong>
+              <span>发布门禁与测试证据</span>
+            </button>
+          </div>
+        </nav>
+
+        <button id="sidebar-mobile-close" class="shell-icon-button" type="button" aria-label="关闭导航">×</button>
+      </aside>
+      <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="关闭导航" hidden></button>
+
+      <section class="workspace">
+        <header class="workspace-topbar" aria-label="工作台工具栏">
+          <div class="workspace-location">
+            <button id="sidebar-collapse" class="shell-icon-button" type="button" aria-expanded="true" aria-controls="sidebar" aria-label="收起导航" title="收起导航"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg></button>
+            <span class="workspace-product">MX Launcher</span>
+            <span class="workspace-divider" aria-hidden="true">/</span>
+            <strong id="workspace-current" aria-live="polite">工作台</strong>
+          </div>
+          <div class="workspace-actions">
+            <button class="shell-icon-button theme-toggle" type="button" data-theme-toggle aria-label="切换到深色模式" title="切换到深色模式">
+              <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 13A8.5 8.5 0 0 1 11 3.5 8.5 8.5 0 1 0 20.5 13Z" /></svg>
+              <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></svg>
+            </button>
+            <details id="account-menu" class="account-menu">
+              <summary aria-label="账号与连接设置" title="账号与连接设置">
+                <span id="account-avatar" class="account-avatar" aria-hidden="true">MX</span>
+                <span id="account-menu-name">账号与连接</span>
+                <svg class="account-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+              </summary>
+              <section class="account-popover" aria-label="账号与连接设置">
+                <div id="admin-account" class="admin-account" hidden>
+                  <span class="admin-account-label">个人账号</span>
+                  <span id="admin-account-status" role="status" aria-live="polite"></span>
+                  <div class="admin-account-actions">
+                    <button id="admin-account-login" class="secondary-button" type="button" hidden>个人账号登录</button>
+                    <button id="admin-account-switch" class="secondary-button" type="button" hidden>切换账号</button>
+                    <a id="admin-account-sessions" class="secondary-button" hidden>网页登录会话</a>
+                  </div>
+                </div>
+                <div class="sidebar-status">
+                  <span id="connection-state" class="state-chip">Ready</span>
+                  <span id="platform-status">Waiting for service</span>
+                </div>
+                <details id="connection-settings" class="connection-settings">
+                  <summary>连接与应急访问</summary>
+                  <div class="connection-fields">
+                    <label class="server-field">
+                      <span>MX Server</span>
+                      <input id="server-input" placeholder="http://127.0.0.1:18090" />
+                    </label>
+                    <form id="ops-token-form" class="server-field ops-token-field">
+                      <label for="ops-token-input">Internal Ops Token</label>
+                      <div class="ops-token-controls">
+                        <input id="ops-token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="session only" aria-describedby="ops-token-help" />
+                        <button id="ops-token-apply" class="primary-button" type="submit" aria-label="应用 Internal Ops Token">应用</button>
+                      </div>
+                      <small id="ops-token-help">Bound to the current MX Server origin; changing MX Server clears it.</small>
+                      <small id="ops-token-feedback" role="status" aria-live="polite" hidden></small>
+                    </form>
+                  </div>
+                </details>
+              </section>
+            </details>
+            <button id="admin-account-logout" class="shell-icon-button" type="button" aria-label="退出当前 Launcher 会话" title="退出当前 Launcher 会话" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4H4v16h6M14 8l4 4-4 4M8 12h11" /></svg></button>
+            <button id="ops-session-logout" class="shell-icon-button" type="button" aria-label="退出 Token 会话" title="退出 Token 会话" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4H4v16h6M14 8l4 4-4 4M8 12h11" /></svg></button>
+          </div>
+        </header>
+        <section id="view-workbench" class="view is-active" aria-labelledby="workbench-heading">
+          <header class="view-header">
+            <div>
+              <p class="workbench-eyebrow">MX / INTERNAL</p>
+              <h2 id="workbench-heading">工作台</h2>
+              <p>管理应用与访问，查看交付和运行情况。</p>
+            </div>
+            <button id="workbench-refresh" class="secondary-button" type="button">刷新应用目录</button>
+          </header>
+          <div class="workbench-toolbar">
+            <label for="workbench-search">查找功能或应用</label>
+            <input id="workbench-search" type="search" placeholder="搜索用户、权限、发版、Hub…" autocomplete="off" />
+            <span id="workbench-search-result" role="status" aria-live="polite"></span>
+          </div>
+          <div id="workbench-content"></div>
+        </section>
+        <section id="view-app-center" class="view" aria-labelledby="app-center-heading">
+          <header class="view-header">
+            <div>
+              <h2 id="app-center-heading">AppCenter</h2>
+              <p id="app-center-subtitle">Installed applications and runtime access.</p>
+            </div>
+            <button id="app-refresh" class="secondary-button" type="button">Refresh</button>
+          </header>
+
+          <section id="launcher-foundation-overview" class="launcher-foundation-overview" aria-label="Launcher foundation overview">
+            <div class="empty-state">Launcher foundation is waiting for Internal.</div>
+          </section>
+
+          <section id="app-selected-detail" class="app-selected-detail" aria-label="Selected application">
+            <div class="empty-state">Select an app to inspect its Launcher mode.</div>
+          </section>
+
+          <section id="app-products-panel" class="app-products-panel" aria-label="Applications">
+            <div class="empty-state">Applications are waiting for Internal.</div>
+          </section>
+        </section>
+
+        <section id="view-admin" class="view admin-view" aria-labelledby="admin-heading">
+          <header class="view-header">
+            <div>
+              <h2 id="admin-heading">I-HDO</h2>
+              <p id="admin-generated">No snapshot loaded</p>
+            </div>
+            <button id="admin-refresh" class="primary-button" type="button">Refresh</button>
+          </header>
+
+          <section id="admin-console" class="admin-console">
+            <section class="admin-module-content">
+              <section id="admin-section-dashboard" class="admin-section is-active">
+                <section class="mx-console-bar" aria-label="MX Console status">
+                  <article class="console-card">
+                    <span>Internal</span>
+                    <strong id="console-internal-state">Waiting</strong>
+                    <small id="console-store-driver">store pending</small>
+                  </article>
+                  <article class="console-card">
+                    <span>Execution</span>
+                    <strong id="console-execution-provider">Worker V1</strong>
+                    <small id="console-gate-state">gates pending</small>
+                  </article>
+                  <article class="console-card">
+                    <span>Evidence</span>
+                    <strong id="console-evidence-count">0</strong>
+                    <small>reports / rollback / audit</small>
+                  </article>
+                  <article class="console-card">
+                    <span>OS Scope</span>
+                    <strong id="console-os-scope">Ubuntu + CentOS</strong>
+                    <small>preflight required</small>
+                  </article>
+                  <article class="console-card console-card-wide">
+                    <span>Operator</span>
+                    <strong id="console-principal">Not signed in</strong>
+                    <small id="console-principal-scope">RBAC shadow</small>
+                  </article>
+                </section>
+
+                <section class="topology-stage" aria-label="MX-3ks topology">
+                  <canvas id="topology-canvas"></canvas>
+                  <div class="topology-overlay" aria-hidden="true">
+                    <span>H Endpoint</span>
+                    <span>Domestic</span>
+                    <span>Internal</span>
+                    <span>Oversea</span>
+                  </div>
+                </section>
+
+                <section class="metrics-grid" aria-label="Platform metrics">
+                  <article class="metric">
+                    <span>Site Slots</span>
+                    <strong id="metric-site-slots">0</strong>
+                  </article>
+                  <article class="metric">
+                    <span>Rollback Runs</span>
+                    <strong id="metric-rollbacks">0</strong>
+                  </article>
+                  <article class="metric">
+                    <span>Release Plans</span>
+                    <strong id="metric-releases">0</strong>
+                  </article>
+                  <article class="metric">
+                    <span>Test Runs</span>
+                    <strong id="metric-tests">0</strong>
+                  </article>
+                </section>
+
+                <section id="dashboard-guidance" class="setup-guide"></section>
+              </section>
+
+              <section id="admin-section-deployment" class="admin-section" hidden>
+                <div class="deployment-heading">
+                  <div>
+                    <h3 id="deployment-title">Oversea Deployment</h3>
+                    <p id="deployment-subtitle">选择一个 Oversea 站点，创建 SSH Profile、运行只读 Probe、再进入受控部署。</p>
+                  </div>
+                  <span id="deployment-site-count">0 sites</span>
+                </div>
+                <section id="setup-guide" class="setup-guide"></section>
+                <section id="site-workbench" class="site-workbench"></section>
+
+                <details class="ops-module-panel ssh-profile-panel" aria-labelledby="ssh-profiles-heading">
+                  <summary class="ops-module-summary">
+                    <span>
+                      <strong id="ssh-profiles-heading">SSH Access</strong>
+                      <small>Machine credential / readiness / profile library</small>
+                    </span>
+                    <span id="ssh-profile-count" class="module-count">0</span>
+                  </summary>
+                  <div class="ops-module-body">
+                  <form id="ssh-profile-form" class="ssh-profile-form">
+                    <input id="ssh-profile-id" type="hidden" />
+                    <label class="form-field">
+                      <span>Site</span>
+                      <input id="ssh-profile-site-id" autocomplete="off" placeholder="oversea-main" required />
+                    </label>
+                    <label class="form-field">
+                      <span>Kind</span>
+                      <select id="ssh-profile-kind">
+                        <option value="oversea">Oversea</option>
+                        <option value="domestic">Domestic</option>
+                      </select>
+                    </label>
+                    <label id="ssh-profile-domestic-network-mode-field" class="form-field" hidden>
+                      <span>Plan Egress</span>
+                      <select id="ssh-profile-domestic-network-mode">
+                        <option value="direct">Domestic direct</option>
+                        <option value="oversea-assisted">Oversea-assisted</option>
+                      </select>
+                    </label>
+                    <label id="ssh-profile-domestic-oversea-site-field" class="form-field" hidden>
+                      <span>Bootstrap Oversea</span>
+                      <select id="ssh-profile-domestic-oversea-site">
+                        <option value="">Select Oversea site</option>
+                      </select>
+                    </label>
+                    <label class="form-field">
+                      <span>Host</span>
+                      <input id="ssh-profile-host" autocomplete="off" placeholder="203.0.113.10" required />
+                    </label>
+                    <label class="form-field">
+                      <span>User</span>
+                      <input id="ssh-profile-user" autocomplete="off" placeholder="root" />
+                    </label>
+                    <label class="form-field">
+                      <span>Password</span>
+                      <input id="ssh-profile-password" autocomplete="new-password" placeholder="one-time bootstrap" type="password" />
+                    </label>
+                    <label class="form-field compact-field checkbox-field">
+                      <span>Rotate</span>
+                      <input id="ssh-profile-rotate-key" type="checkbox" />
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>Port</span>
+                      <input id="ssh-profile-port" inputmode="numeric" min="1" placeholder="22" type="number" />
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>HY2 UDP</span>
+                      <input id="ssh-profile-hy2-ports" autocomplete="off" inputmode="numeric" placeholder="51288" />
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>Health TCP</span>
+                      <input id="ssh-profile-health-port" inputmode="numeric" min="1" placeholder="3435" type="number" />
+                    </label>
+                    <div class="ssh-bandwidth-fields">
+                    <label class="form-field">
+                      <span>节点带宽策略</span>
+                      <select id="ssh-profile-bandwidth-mode">
+                        <option value="limited">限速（默认）</option>
+                        <option value="unlimited">不限速</option>
+                      </select>
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>用户上传 Mbps</span>
+                      <input id="ssh-profile-bandwidth-up" type="number" min="0.001" max="100000" step="any" value="30" />
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>用户下载 Mbps</span>
+                      <input id="ssh-profile-bandwidth-down" type="number" min="0.001" max="100000" step="any" value="30" />
+                    </label>
+                    <p class="field-help">每个客户端的服务端上限，仅适用于 Oversea。保存后执行该节点的 Sync Remote 生效；普通用户订阅保留原带宽设置。</p>
+                    </div>
+                    <label class="form-field wide-field">
+                      <span>Worker URL</span>
+                      <input id="ssh-profile-worker-internal-url" autocomplete="off" placeholder="http://127.0.0.1:18090" />
+                    </label>
+                    <label class="form-field wide-field">
+                      <span>Callback URL</span>
+                      <input id="ssh-profile-oversea-callback-url" autocomplete="off" placeholder="optional / push-only" />
+                    </label>
+                    <label class="form-field">
+                      <span>Strict</span>
+                      <select id="ssh-profile-strict">
+                        <option value="yes">yes</option>
+                        <option value="accept-new">accept-new</option>
+                        <option value="ask">ask</option>
+                        <option value="no">no</option>
+                      </select>
+                    </label>
+                    <label class="form-field">
+                      <span>Batch</span>
+                      <select id="ssh-profile-batch-mode">
+                        <option value="yes">yes</option>
+                        <option value="no">no</option>
+                      </select>
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>Timeout</span>
+                      <input id="ssh-profile-timeout" inputmode="numeric" min="1" placeholder="10" type="number" />
+                    </label>
+                    <label class="form-field wide-field">
+                      <span>Identity</span>
+                      <input id="ssh-profile-identity" autocomplete="off" placeholder="/opt/mx/secrets/oversea_ed25519" />
+                    </label>
+                    <label class="form-field wide-field">
+                      <span>Known Hosts</span>
+                      <input id="ssh-profile-known-hosts" autocomplete="off" placeholder="/opt/mx/secrets/known_hosts" />
+                    </label>
+                    <label class="form-field wide-field">
+                      <span>SSH Config</span>
+                      <input id="ssh-profile-config-file" autocomplete="off" placeholder="/opt/mx/secrets/config.oversea-main" />
+                    </label>
+                    <label class="form-field wide-field">
+                      <span>Host Alias</span>
+                      <input id="ssh-profile-host-key-alias" autocomplete="off" placeholder="oversea-main" />
+                    </label>
+                    <div class="ssh-profile-actions">
+                      <button id="ssh-profile-save" class="primary-button" type="submit">Save Profile</button>
+                      <button id="ssh-profile-refresh-host-key" class="secondary-button" type="button">Refresh Host Key</button>
+                      <button id="ssh-profile-bootstrap" class="secondary-button" type="button">Bootstrap Key</button>
+                      <button id="ssh-profile-create-plan" class="secondary-button" type="button">Create Plan</button>
+                      <button id="ssh-profile-shadow-setup" class="secondary-button" type="button">Shadow Setup</button>
+                      <span id="ssh-profile-feedback" class="profile-feedback"></span>
+                    </div>
+                  </form>
+                  <div id="ssh-profile-bootstrap-result" class="ssh-bootstrap-result"></div>
+                  <div id="ssh-profile-shadow-result" class="ssh-shadow-result"></div>
+                  <section class="ssh-readiness-panel" aria-labelledby="ssh-readiness-heading">
+                    <div class="section-title compact-title">
+                      <h4 id="ssh-readiness-heading">Readiness Gates</h4>
+                      <span id="ssh-readiness-status">idle</span>
+                    </div>
+                    <div class="ssh-readiness-actions">
+                      <button id="ssh-profile-readiness-run" class="secondary-button" type="button">Check Readiness</button>
+                      <button id="ssh-profile-readiness-execute" class="secondary-button" type="button">Run Readonly Probe</button>
+                      <button id="ssh-profile-policy-enable" class="secondary-button" type="button">Allow Readonly</button>
+                    </div>
+                    <div id="ssh-profile-readiness" class="ssh-readiness-body"></div>
+                  </section>
+                  <div id="ssh-profile-list" class="ssh-profile-items"></div>
+                  </div>
+                </details>
+
+                <section class="admin-layout">
+                  <section class="pipeline-list" aria-labelledby="pipelines-heading">
+                    <div class="section-title">
+                      <h3 id="pipelines-heading">Sites</h3>
+                      <span id="pipeline-count">0</span>
+                    </div>
+                    <div id="pipeline-list" class="pipeline-items"></div>
+                  </section>
+
+                  <section class="pipeline-detail" aria-labelledby="pipeline-detail-heading">
+                    <div class="section-title">
+                      <h3 id="pipeline-detail-heading">Deployment Progress</h3>
+                      <span id="pipeline-health" class="health-chip">Idle</span>
+                    </div>
+                    <div id="pipeline-summary" class="summary-strip"></div>
+                    <div id="pipeline-stepper" class="pipeline-stepper"></div>
+                    <div id="pipeline-actions" class="action-panel"></div>
+                    <ol id="pipeline-timeline" class="timeline"></ol>
+                  </section>
+                </section>
+              </section>
+
+              <section id="admin-section-services" class="admin-section" hidden>
+                <div id="service-operations-panel"></div>
+              </section>
+
+              <section id="admin-section-foundations" class="admin-section" hidden>
+                <div class="deployment-heading">
+                  <div>
+                    <h3 id="foundation-heading">Internal 基础系统</h3>
+                    <p id="foundation-subtitle">这些服务属于 Internal 控制面，先预留 Admin 操作入口和权限边界。</p>
+                  </div>
+                </div>
+                <details class="ops-module-panel awx-provider-panel" aria-labelledby="awx-provider-heading">
+                  <summary class="ops-module-summary">
+                    <span>
+                      <strong id="awx-provider-heading">AWX Provider</strong>
+                      <small>API endpoint / inventory / credential / job template</small>
+                    </span>
+                    <span id="awx-provider-count" class="module-count">0</span>
+                  </summary>
+                  <div class="ops-module-body">
+                  <form id="awx-provider-form" class="awx-provider-form">
+                    <label class="form-field">
+                      <span>Provider ID</span>
+                      <input id="awx-provider-id" autocomplete="off" placeholder="awxprov_oversea" />
+                    </label>
+                    <label class="form-field">
+                      <span>Name</span>
+                      <input id="awx-provider-name" autocomplete="off" placeholder="Oversea AWX Shadow" />
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>Status</span>
+                      <select id="awx-provider-status">
+                        <option value="active">active</option>
+                        <option value="paused">paused</option>
+                      </select>
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>Kind</span>
+                      <select id="awx-provider-kind">
+                        <option value="oversea">oversea</option>
+                        <option value="domestic">domestic</option>
+                        <option value="all">all</option>
+                      </select>
+                    </label>
+                    <label class="form-field wide-field">
+                      <span>Base URL</span>
+                      <input id="awx-provider-base-url" autocomplete="off" placeholder="https://awx.internal.example" />
+                    </label>
+                    <label class="form-field">
+                      <span>Organization</span>
+                      <input id="awx-provider-organization" autocomplete="off" placeholder="MX Internal" />
+                    </label>
+                    <label class="form-field">
+                      <span>Project</span>
+                      <input id="awx-provider-project" autocomplete="off" placeholder="mx-launcher-site-slots" />
+                    </label>
+                    <label class="form-field">
+                      <span>Inventory Prefix</span>
+                      <input id="awx-provider-inventory-prefix" autocomplete="off" placeholder="mx" />
+                    </label>
+                    <label class="form-field">
+                      <span>Credential Prefix</span>
+                      <input id="awx-provider-credential-prefix" autocomplete="off" placeholder="mx" />
+                    </label>
+                    <label class="form-field">
+                      <span>Template Prefix</span>
+                      <input id="awx-provider-template-prefix" autocomplete="off" placeholder="mx-site-slot" />
+                    </label>
+                    <label class="form-field compact-field checkbox-field">
+                      <span>TLS</span>
+                      <input id="awx-provider-verify-tls" type="checkbox" checked />
+                    </label>
+                    <label class="form-field compact-field">
+                      <span>Timeout</span>
+                      <input id="awx-provider-timeout" inputmode="numeric" min="1" placeholder="30" type="number" />
+                    </label>
+                    <label class="form-field wide-field">
+                      <span>API Token</span>
+                      <input id="awx-provider-token" autocomplete="off" placeholder="bearer token for check / launch" type="password" />
+                    </label>
+                    <div class="awx-provider-actions">
+                      <button id="awx-provider-save" class="primary-button" type="submit">Save Provider</button>
+                      <button id="awx-provider-check-run" class="secondary-button" type="button">Check Provider</button>
+                      <span id="awx-provider-feedback" class="profile-feedback"></span>
+                    </div>
+                  </form>
+                  <div id="awx-provider-check" class="awx-provider-check"></div>
+                  <div id="awx-runtime-gates" class="awx-runtime-gates"></div>
+                  <div id="awx-provider-list" class="awx-provider-items"></div>
+                  </div>
+                </details>
+                <div id="foundation-grid" class="foundation-grid"></div>
+                <div id="identity-applications-panel" hidden></div>
+              </section>
+
+              <section id="admin-section-evidence" class="admin-section" hidden>
+                <div class="deployment-heading">
+                  <div>
+                    <h3 id="evidence-heading">Evidence History</h3>
+                    <p id="evidence-subtitle">历史 plan、runner、worker、report 在这里查，不再混入站点部署主入口。</p>
+                  </div>
+                </div>
+                <div id="evidence-history" class="evidence-history"></div>
+              </section>
+            </section>
+
+            <aside id="admin-inspector" class="admin-inspector" aria-labelledby="inspector-title">
+              <div class="inspector-head">
+                <div class="inspector-title-block">
+                  <span id="inspector-kind" class="site-kind">Inspector</span>
+                  <h3 id="inspector-title">No object selected</h3>
+                  <p id="inspector-meta">Select a site or pipeline to inspect.</p>
+                </div>
+                <div class="inspector-head-actions">
+                  <span id="inspector-status" class="health-chip" data-health="ready">idle</span>
+                  <button id="inspector-toggle" class="icon-button inspector-toggle" type="button" aria-label="Collapse inspector" aria-expanded="true" title="Collapse inspector">→</button>
+                </div>
+              </div>
+              <dl id="inspector-facts" class="inspector-facts inspector-body"></dl>
+              <section class="inspector-section inspector-body">
+                <h4>Next Gate</h4>
+                <div id="inspector-next">No gated action selected.</div>
+              </section>
+              <section class="inspector-section inspector-body">
+                <h4>Recent Evidence</h4>
+                <div id="inspector-evidence" class="inspector-evidence"></div>
+              </section>
+            </aside>
+          </section>
+        </section>
+      </section>
+    </main>
+    <div id="app-editor-backdrop" class="app-editor-backdrop" hidden></div>
+    <aside id="app-editor-drawer" class="app-editor-drawer" aria-labelledby="app-editor-title" aria-modal="true" role="dialog" hidden></aside>
+    <div id="user-editor-backdrop" class="app-editor-backdrop user-editor-backdrop" hidden></div>
+    <aside id="user-editor-drawer" class="app-editor-drawer user-editor-drawer" aria-labelledby="user-editor-title" aria-modal="true" role="dialog" hidden></aside>
+    <div id="mx-h2i-lease-backdrop" class="app-editor-backdrop mx-h2i-lease-backdrop" hidden></div>
+    <aside id="mx-h2i-lease-drawer" class="app-editor-drawer mx-h2i-lease-drawer" aria-labelledby="mx-h2i-lease-drawer-title" aria-modal="true" role="dialog" tabindex="-1" hidden></aside>
+    <div id="evidence-backdrop" class="evidence-backdrop" hidden></div>
+    <aside id="evidence-drawer" class="evidence-drawer" aria-labelledby="evidence-title" hidden>
+      <header class="evidence-header">
+        <div>
+          <span id="evidence-kind" class="evidence-kind">Evidence</span>
+          <h2 id="evidence-title">Evidence</h2>
+          <p id="evidence-meta"></p>
+        </div>
+        <button id="evidence-close" class="secondary-button" type="button">Close</button>
+      </header>
+      <div class="evidence-scroll">
+        <div id="evidence-summary" class="evidence-summary"></div>
+        <div id="evidence-steps" class="evidence-steps"></div>
+        <details class="evidence-json">
+          <summary>Object</summary>
+          <pre id="evidence-json"></pre>
+        </details>
+      </div>
+    </aside>
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>

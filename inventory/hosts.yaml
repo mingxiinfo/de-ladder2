@@ -21,7 +21,7 @@ hosts:
     lan_ip: 192.168.1.2
     wg_ip: 10.88.88.88
     openvpn_ip: 100.127.0.10        # qp-tunnel-cli open mesh，instance mx，profile internal-01
-    os: CentOS 系（LVM 卷组 cl），具体版本待确认
+    os: CentOS Linux 8（不是 Stream；VERSION_ID 8，PLATFORM_ID platform:el8）。用户 2026-11-21 贴的 /etc/os-release。2021-12-31 已停止维护；用户定了保持这个系统（docs/39）
     cpu: 128 核（出自 mx-static/docs/capacity.md）
     memory: 256G（使用约 60%）
     disks:                          # df -TH 截图，2026-11-17
@@ -39,7 +39,7 @@ hosts:
       5432: 宿主机 PostgreSQL 16（Night-All / po-infra 源数据，不是 mx-common 的库）
       7788: 构建用出网代理（mihomo）
       7789: 构建用出网代理（Device / Pay 曾用）
-    source: electron-dock/README.md、mx-launcher/docs/50、mx-base/mx-move/README.md、用户提供的 fstab 截图
+    source: electron-dock/README.md、mx-launcher/docs/50、mx-base/mx-move/README.md、用户提供的 fstab 截图、用户贴的 /etc/os-release（2026-11-21）
 
   s2:
     name: 待定（建议 mx-internal-server-2）
@@ -47,7 +47,7 @@ hosts:
     role: control
     desc: 新集群的第一个控制面，也是发起所有操作的主控
     lan_ip: 192.168.1.4              # 用户 2026-11-17，可调整
-    wg_ip: 待确认（建议 10.88.88.89）
+    wg_ip: 10.88.88.89               # 边缘隧道 qpjoy-d02（domestic02 10.88.0.2），用户 2026-11-22 说真机已通（docs/44）。Launcher 的 service peer 在 s2 那套里是角色地址 10.88.88.88，还没装（docs/48）
     os: Ubuntu 26.04
     memory: 约 256G（用户口述"差不多"）
     disks: 预计 2T，一块。分卷方案见 docs/16；建议加一块小 SSD 放系统和 etcd

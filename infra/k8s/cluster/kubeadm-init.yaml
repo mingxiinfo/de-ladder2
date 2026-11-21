@@ -1,35 +1,47 @@
-# 新集群第一个控制面（s2）。用法见 docs/14 第 6 节（已按 docs/16 修订）。没有实测。
-# kubeadm init --config kubeadm-init.yaml --upload-certs
+# 新集群第一个控制面（s2）。没有实测。
+# 由 ./scripts/manage.sh node prepare s2 cluster 渲染后执行（scripts/roles/control/40-cluster.sh，docs/35）：
+#   @NODE_NAME@         本机主机名
+#   @K8S_VERSION@       已装的 kubeadm 版本（kubeadm version -o short）
+#   @LAN_IP@            inventory/hosts.yaml 的 lan_ip
+#   @WG_IP@             inventory/hosts.yaml 的 wg_ip；没登记成地址时整行去掉
+#   @IMAGE_REPOSITORY@  versions.env 的 K8S_IMAGE_REPOSITORY
+# 手工用时把这几处换掉：kubeadm init --config kubeadm-init.yaml --upload-certs
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 localAPIEndpoint:
-  advertiseAddress: 192.168.1.4        # s2 的 LAN 地址（inventory/hosts.yaml）
+  advertiseAddress: @LAN_IP@
   bindPort: 6443
 nodeRegistration:
-  name: CHANGE-ME                      # 改：s2 的主机名
+  name: @NODE_NAME@
   criSocket: unix:///run/containerd/containerd.sock
+  kubeletExtraArgs:
+    # 机器上有 WireGuard、OpenVPN 等多块网卡，节点地址固定用 LAN 地址
+    - name: node-ip
+      value: "@LAN_IP@"
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
-kubernetesVersion: v1.36.CHANGE-ME     # 改：补丁版本与 s1 的 kubectl version 一致
+kubernetesVersion: @K8S_VERSION@
 clusterName: ladder2
+imageRepository: @IMAGE_REPOSITORY@
 # 固定的名字，不是某台机器的地址。各节点 /etc/hosts 里把它指向 s2。
 # 设了这一项，以后加控制面不用重建集群（docs/16）。
 controlPlaneEndpoint: k8s-api.ladder2.internal:6443
 networking:
-  podSubnet: 10.244.0.0/16             # 与 versions.env 的 POD_CIDR 一致
-  serviceSubnet: 10.96.0.0/12          # 与 versions.env 的 SERVICE_CIDR 一致
+  podSubnet: 192.168.224.0/20          # 与 versions.env 的 POD_CIDR 一致（沿用 s1，docs/41）
+  serviceSubnet: 192.168.240.0/20      # 与 versions.env 的 SERVICE_CIDR 一致
 apiServer:
   certSANs:
     - k8s-api.ladder2.internal
-    - 192.168.1.4
-    - 10.88.88.89                      # 改：s2 的 WireGuard 地址（待确认）
+    - @LAN_IP@
+    - @WG_IP@
 etcd:
   local:
     dataDir: /var/lib/etcd             # 单独的逻辑卷，或单独的系统 SSD（docs/16）
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
+cgroupDriver: systemd
 # 磁盘到 85% 开始回收镜像，留出处理时间（告警线 70%，行动线 80%，docs/20）。
 imageGCHighThresholdPercent: 85
 imageGCLowThresholdPercent: 75

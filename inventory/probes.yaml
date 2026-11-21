@@ -2,16 +2,26 @@
 # 一条链路 = 同一个请求从外到里的四个进入点：edge（公网域名）、host_nginx、gateway、service。
 # 某一层没有或还不知道地址就写 待确认，探测时显示"未登记"，不会被当成不通。
 # host：请求里的域名，内网各层靠它选路由。path：探测路径，用不访问数据库的 /healthz。
+# in_cluster：集群里的地址（Service 的 DNS 名），只给 manage.sh loadtest 从集群里压 service 那一层用（docs/35）。
 # 这里不放带凭据的地址。
 routes:
   sample:
-    what: 样板服务，打通全链路时用。s2 还没装，下面的地址现在都不通
-    host: sample.example.com
+    what: 样板服务 services/sample，经 Gateway public（docs/35）。/healthz 不访问数据库
+    host: sample.ladder2.internal
     path: /healthz
     edge: 待确认
     host_nginx: http://192.168.1.4
     gateway: http://192.168.1.4:30080
-    service: 待确认
+    service: 待确认                  # ClusterIP 每次部署会变，从宿主机测用 node verify s2 sample
+    in_cluster: http://sample.sample.svc.cluster.local   # 只在集群里能解析，loadtest 的 service 一层用
+  sample-internal:
+    what: 同一个样板服务，经 Gateway internal（docs/18）。host-nginx 不把这个域名转给 internal，所以只登记网关这一层
+    host: sample.ladder2.internal
+    path: /healthz
+    edge:
+    host_nginx:
+    gateway: http://192.168.1.4:30081
+    service:
 
   # 海外站点（docs/33）。站点不经 host-nginx 和 Gateway，只登记公网那一层；
   # 应用只听站点本机的回环，从内网探测不到，所以 service 不登记。

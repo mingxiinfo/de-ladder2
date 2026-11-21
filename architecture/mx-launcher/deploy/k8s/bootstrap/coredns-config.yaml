@@ -1,0 +1,53 @@
+# 分流 DNS mx-internal-coredns 的初始 Corefile。
+# 只在集群里还没有时由 ./scripts/manage.sh app apply / app deploy 建一次，之后归 Launcher 运行时改写，不会被覆盖（docs/47）。
+# 不要手改：改 deploy/k8s/base/config.env 或 Launcher 的生成函数后，跑 architecture/mx-launcher/scripts/manage.sh bootstrap-render。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: mx-dns
+  labels:
+    app.kubernetes.io/name: coredns
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/component: dns-control
+    ladder2/project: mx-launcher
+data:
+  Corefile: |
+    internal.mx:53 {
+      errors
+      log
+      hosts {
+        10.88.88.88 internal.mx gateway.internal.mx dns.internal.mx service-peer.internal.mx
+        10.88.0.1 domestic-relay.internal.mx
+        fallthrough
+      }
+      rewrite name exact host-runner.internal.mx mx-internal-host-runner.mx-internal-shadow.svc.cluster.local
+      cache 30
+      reload
+      forward . /etc/resolv.conf
+    }
+    corp.mx:53 {
+      errors
+      log
+      cache 30
+      reload
+      forward . /etc/resolv.conf
+    }
+    h2i.mx:53 {
+      errors
+      log
+      cache 30
+      reload
+      forward . /etc/resolv.conf
+    }
+    .:53 {
+      errors
+      hosts {
+        10.88.88.88 h2i.mxinfo-inc.cn
+        fallthrough
+      }
+      cache 30
+      reload
+      forward . /etc/resolv.conf
+    }
+  mx-zone-snapshot.json: "{}"

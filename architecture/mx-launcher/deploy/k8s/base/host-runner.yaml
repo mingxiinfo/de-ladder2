@@ -1,0 +1,43 @@
+# host-runner：在宿主机上替 Launcher 装和管 WireGuard（service peer mx-internal-svc）（docs/47）。
+# 这里只给权限，不建 DaemonSet：DaemonSet 和它的 Service 由 Launcher 自己建
+# （管理界面 → Internal Service Peer → Ensure K8s Fallback，server/src/modules/admin/admin.controller.ts
+# 的 internalServicePeerHostRunnerK8sObjects）。清单里也建的话，app apply 和 Launcher 会来回改同一个对象。
+# Launcher 建的 DaemonSet 用 hostNetwork、privileged，监听宿主机的 19190（不是 80 / 443，docs/18 允许），
+# 只在打了 mx.ladder2/site-peer=true 的节点上跑（MX_INTERNAL_HOST_RUNNER_NODE_SELECTOR，L2 加的）。
+# 权限照 L1 deploy/k8s/internal-shadow/27-host-runner-rbac.yaml。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mx-internal-host-runner-manager
+  labels: { app.kubernetes.io/name: mx-internal-host-runner-manager, app.kubernetes.io/part-of: mx-3ks }
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["mx-internal-host-runner"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["mx-internal-host-runner"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mx-launcher-internal-host-runner-manager
+  labels: { app.kubernetes.io/name: mx-launcher-internal-host-runner-manager, app.kubernetes.io/part-of: mx-3ks }
+subjects:
+  - kind: ServiceAccount
+    name: mx-launcher-internal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mx-internal-host-runner-manager

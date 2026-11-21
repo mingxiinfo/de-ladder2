@@ -32,7 +32,7 @@
       "title": "两个集群并存，一个服务一个服务地搬",
       "when": "s2 到位后",
       "status": "设计",
-      "summary": "s2 建新的 kubeadm 集群，先把备份做好，再逐个迁入服务。s1 只减不增，Launcher 最后迁。",
+      "summary": "s2 建新的 kubeadm 集群，先把备份做好；然后先复刻 Launcher（SSO 是后面服务的前提），再迁 mx-pay、Hub、DataPort。s1 只减不增，用户流量最后才切到 s2。",
       "points": [
         "外部流量：Domestic Nginx → WireGuard → host-nginx → Gateway public → 服务",
         "内部流量：办公网和 H2I 用户走 Gateway internal",
@@ -58,7 +58,20 @@
         "18",
         "22",
         "23",
-        "27"
+        "27",
+        "36",
+        "37",
+        "38",
+        "39",
+        "40",
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46",
+        "47",
+        "48"
       ]
     },
     {
@@ -82,7 +95,9 @@
       "docs": [
         "16",
         "21",
-        "22"
+        "22",
+        "45",
+        "47"
       ]
     },
     {
@@ -165,6 +180,90 @@
       "date": "2026-11-17",
       "docs": "33–34",
       "decisions": "arguseek 登记进 projects/；toC 站点放一台云服务器：给 arguseek 新开一个 Delta 实例，查 Hub 走公开接口；区域按实测选，东京、新加坡优先；NAS 读写用本机缓存加内网发起的隧道"
+    },
+    {
+      "round": "第七轮",
+      "date": "2026-11-19",
+      "docs": "35",
+      "decisions": "s2 分 14 个阶段落地，每个阶段 node prepare 做、node verify 验；每一层（service、两个 Gateway、host-nginx、pg-common）压 1000 QPS 才算完成；host-nginx 转 NodePort 用 LAN 地址；默认存储类 local-retain；加 metrics-server"
+    },
+    {
+      "round": "第八轮",
+      "date": "2026-11-20",
+      "docs": "36",
+      "decisions": "L1 的 pro 分支拷到 ladder1/ 并在副本上改造；Launcher 第一个在 s2 上复刻（独立的库和 WireGuard 地址，不连生产边缘），切换仍排最后；控制面一台 master，三台才做自动切换；Caddy 去掉 hostNetwork，放到 Gateway internal 后面"
+    },
+    {
+      "round": "第九轮",
+      "date": "2026-11-21",
+      "docs": "37",
+      "decisions": "加第二台 Domestic：先只分公网 HTTPS 域名，H2I 中继不动，回源走 s2 不碰 s1；中继容灾等 Launcher 支持多中继；边缘机器用 qp-tunnel-cli edge 从 Internal 经 SSH 推送部署，不装 Kubernetes；ladder1 移出 Git"
+    },
+    {
+      "round": "第十轮",
+      "date": "2026-11-21",
+      "docs": "38",
+      "decisions": "edge 按技术栈分目录：wg-nginx、open-nginx、hy2-mihomo，密钥和域名走 --state-dir 不进包；Hysteria2 服务端原样运行 docker/hysteria2-mihomo-stack；edge status 看本机和每台机器；系统分 debian、rhel 两族，推送前检查，不支持就什么都不动；v1 Launcher 推的组件不接管；仍不做双 master，集群节点建议统一 Ubuntu"
+    },
+    {
+      "round": "第十一轮",
+      "date": "2026-11-21",
+      "docs": "39",
+      "decisions": "\"双 master\"是两台推送机，不是两个控制面；每台 Internal 都能推送，机器记着谁管哪个组件，换推送机要 --take-over；edge relations 列出推送机 → 机器 → 组件；配置目录放推送机的 /var/lib/qp-tunnel/edge，丢了用 state pull 拿回；有 v1 组件的机器整台不推；hy2 镜像固定为 v2.14.0、2.11.9-alpine；s1 是 CentOS Linux 8 且保持不变"
+    },
+    {
+      "round": "第十二轮",
+      "date": "2026-11-22",
+      "docs": "40",
+      "decisions": "domestic02 到 internal02 的隧道照 L1 的 mx-domestic 10.88.0.1 / mx-internal-svc 10.88.88.88 做成 edge link：internal02 上生成两对密钥，edge push --stack wg-nginx 推中继，edge link up 装本端，只路由一段，不转发、不 NAT；wg-nginx 的站点可选，先起隧道；10.88–10.254 归 Launcher 的产品网段，建议 10.87.<n>.0/24（待定）；集群网段落在 Launcher 产品网段范围里，记为待定"
+    },
+    {
+      "round": "第十三轮",
+      "date": "2026-11-22",
+      "docs": "41",
+      "decisions": "10.* 都归 Launcher 的应用：L2 集群网段改成和 s1 一样的 192.168.224.0/20、192.168.240.0/20；边缘隧道按 v1 放进 100.127，用 100.127.(200+n).0/24，domestic02 是 100.127.202.0/24；网卡改名 qpjoy-relay、qpjoy-<机器>；qp-tunnel-cli edge setup 一步步问、给默认值；缺的工具（wireguard-tools 等）先问再装"
+    },
+    {
+      "round": "第十四轮",
+      "date": "2026-11-22",
+      "docs": "42",
+      "decisions": "边缘机器只给了密码时照 v1 的 Bootstrap Key：密码只输进 ssh 自己的提示、不保存，用一次装上推送机的 edge 密钥（/var/lib/qp-tunnel/edge/ssh/id_ed25519），之后都用密钥；edge key install 和 edge setup 第 3、4 步都会问；家目录组/其他人可写时去掉写权限"
+    },
+    {
+      "round": "第十五轮",
+      "date": "2026-11-22",
+      "docs": "43",
+      "decisions": "边缘拓扑只走 Domestic → Internal：Domestic 之间不连，Internal 之间走 LAN，s1 先不加；nginx 在后端之间分流，DNS 在 Domestic 之间切换；所有边缘隧道共用 100.127.200.0/24，Domestic .N、Internal .87+N（domestic02 .2、s2 .89），Internal 只路由各 Domestic 的 /32；link check 说明握不上手的原因；--replace 重建隧道，旧文件挪开不删"
+    },
+    {
+      "round": "第十六轮",
+      "date": "2026-11-22",
+      "docs": "44",
+      "decisions": "边缘隧道默认沿用 Launcher 的编号：Internal 10.88.88.88/.89 往上，Domestic 10.88.0.N（10.88.0.1 留给现在那台）；只路由 /32，和 Launcher 的 10.88 共存；100.127.200.0/24 作为 isolated 方案保留，可以切换；真机上 internal02 → domestic02 已通"
+    },
+    {
+      "round": "第十七轮",
+      "date": "2026-11-22",
+      "docs": "45",
+      "decisions": "Launcher v2 之前：控制面仍只有 s2 一台，s1 等用户切走后重装、作为 node 加入，第三台到了再升三台 control；组件沿用 kubeadm、containerd、etcd、CoreDNS、flannel，变的是部署方式（镜像仓库、PVC、NodePort、选主）；先补镜像、密钥、备份、smoke 等命令行；MX-H2I v2 以 MinCave 为底，把旧界面的 H2O 管理、AppCenter 调试等做进去，测试版用单独身份；真机上 domestic02 10.88.0.2 ↔ internal02 10.88.88.89 已通"
+    },
+    {
+      "round": "第十八轮",
+      "date": "2026-11-22",
+      "docs": "46",
+      "decisions": "开始实施：不在 ladder1 里改，项目一个个迁进本工程，和 k8s 高度集成的平台放 architecture/，业务项目连源码放 projects/；Launcher 从 L1 1d9555e8 拷进 architecture/mx-launcher/，写了镜像、pg-launcher（CloudNativePG）、API、Caddy（不占宿主机端口，只信任网关带来的客户端地址）、HTTPRoute 的清单和 image / secret / app status 命令，host-nginx 加了 18090 的入口；本机构建、迁移、启动都测过，没在集群上部署过"
+    },
+    {
+      "round": "第十九轮",
+      "date": "2026-11-22",
+      "docs": "47",
+      "decisions": "服务放哪台交给调度器（按 requests），人只定 GPU、service peer、数据库、分散副本，k8s capacity 看依据；Launcher 去掉 Caddy：API 经 Gateway internal 直达，应用网关换成读 Launcher 生成的 nginx.conf 的 nginx；app deploy 分检查、一次性步骤（台账、归档）、apply、滚动、验证；host-runner 和分流 DNS（externalIPs）在 Launcher 管理界面上操作；发现 Launcher 把 10.88.88.88 写死成 Internal 的角色地址，待定"
+    },
+    {
+      "round": "第二十轮",
+      "date": "2026-11-22",
+      "docs": "48",
+      "decisions": "10.88.88.88（Internal）和 10.88.0.1（Domestic）是 Launcher 的角色地址，跟着角色走：s2 那套也用 .88，用自己的新密钥，切换时换生产 Domestic 上这个对端的公钥；边缘隧道的 launcher 方案把 .88 保留，s1 以后的边缘地址是 .87，s2 仍是 .89"
     }
   ]
 }

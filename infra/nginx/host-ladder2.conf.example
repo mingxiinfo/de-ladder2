@@ -1,3 +1,5 @@
+# 已被 infra/nginx/s2/ladder2.conf.tmpl 取代（docs/35）：s2 上用那份，由 node prepare s2 host-nginx 安装。
+# 这份留作说明。两处不同：转到 NodePort 用本机 LAN 地址而不是 127.0.0.1；多了 default_server 的健康检查。
 # 内网服务器（s2）宿主机 Nginx：80 端口的唯一主人。没有实测。
 # 正式配置放部署仓 de-mingxi/compass/deploy/internal-nginx/，这里是样板。
 # 规则见 docs/05：进了集群的域名转到网关 30080；没进集群的程序直接转到它的端口。

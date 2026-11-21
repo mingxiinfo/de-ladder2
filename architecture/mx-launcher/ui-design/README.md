@@ -1,0 +1,189 @@
+# @qpjoy/ui-design-neon-void
+
+Neon Void is the reusable QPJoy tool UI style extracted from the MX Launcher design base. It packages the original deep blue-black/cyan dark mode plus an opt-in cool light companion as npm-ready tokens and CSS components.
+
+## Design Language
+
+Neon Void is built for dense product and operations tools, not marketing pages. The first screen should feel like a working console: clear navigation, compact state feedback, direct actions, and enough contrast for repeated daily use.
+
+- Backgrounds step from `BG1 #141417` to `BG4 #292C37`, creating a dark canvas, workspace, panel, and dialog/actionbar elevation system.
+- Main interaction color is `M1 #2BF6D2`, with hover `#11CDB5` and pressed `#079987`.
+- Status colors are intentionally saturated: danger `#EE6067`, warning `#F8D06C`, success `#48BC77`, info `#5E8EEC`, archetype `#B974FF`.
+- Text is a five-step alpha ladder on `#E2E2E2`, so disabled, muted, metadata, and primary text can stay consistent.
+- Radius is restrained at 4/6/8px, with pill radius only for tags, avatars, switches, and chips.
+- Effects are quiet: a few drop shadows, subtle inner highlights, cyan focus rings, and dashed purple design frames for component specimens.
+- Typography follows the screenshot scale: 20/16/14/12/10px with 150% line-height, using Poppins first and system CJK fallbacks.
+
+## Install
+
+```sh
+pnpm add @qpjoy/ui-design-neon-void
+```
+
+```ts
+import '@qpjoy/ui-design-neon-void/styles.css';
+import { neonVoidTokens } from '@qpjoy/ui-design-neon-void';
+```
+
+```html
+<main class="qp-app qp-theme-neon-void qp-density--medium">
+  <button class="qp-button qp-button--primary">Publish</button>
+  <input class="qp-input" placeholder="Search" />
+</main>
+```
+
+## Density
+
+The screenshots look compact because of capture scale, so the library does not lock the style to a compact UI. Use one of three densities on any container:
+
+```html
+<section class="qp-theme-neon-void qp-density--small">...</section>
+<section class="qp-theme-neon-void qp-density--medium">...</section>
+<section class="qp-theme-neon-void qp-density--large">...</section>
+```
+
+Individual controls also support explicit sizes such as `qp-button--sm`, `qp-button--md`, `qp-button--lg`, `qp-input--sm`, `qp-input--md`, and `qp-input--lg`.
+
+## Themes
+
+Dark remains the default contract. Apply the light class explicitly when a product needs the cool white/blue-gray palette; both modes keep the same spacing, type scale and component anatomy.
+
+```html
+<main class="qp-app qp-theme-neon-void">...</main>
+<main class="qp-app qp-theme-neon-void-light">...</main>
+```
+
+The light primary is a deeper teal so text, focus and selected states remain legible on white surfaces. Use `neonVoidLightTheme` or `neonVoidLightCssVariables` when consuming tokens from TypeScript.
+
+## Exports
+
+- `@qpjoy/ui-design-neon-void/styles.css`: tokens plus component classes.
+- `@qpjoy/ui-design-neon-void/tokens.css`: CSS custom properties only.
+- `@qpjoy/ui-design-neon-void/tokens.json`: portable design tokens.
+- `@qpjoy/ui-design-neon-void`: TypeScript token and class name helpers.
+
+## Component Classes
+
+- Layout: `qp-app`, `qp-shell`, `qp-sidebar`, `qp-main`, `qp-panel`, `qp-card`, `qp-section-title`.
+- Actions: `qp-button`, `qp-icon-button`, `qp-button--primary`, `qp-button--outline`, `qp-button--ghost`, `qp-button--transparent`, `qp-button--danger`.
+- Form: `qp-field`, `qp-input`, `qp-select`, `qp-dropdown`, `qp-textarea`, `qp-input-group`. Use `qp-select` only as a native fallback; products that require a consistently themed popup should use `qp-dropdown--searchable` with `qp-dropdown__search`, `qp-dropdown__options`, `qp-dropdown__group`, `qp-dropdown__empty`, and `qp-dropdown__check`.
+- Choice: `qp-choice--radio`, `qp-choice--checkbox`, `qp-switch`, `qp-slider`, `qp-segmented`.
+- Feedback: `qp-tag`, `qp-status`, `qp-toast`, `qp-modal-backdrop`, `qp-modal`, `qp-dialog`, `qp-actionbar`.
+- Data navigation: `qp-pagination`, `qp-pagination__summary`, `qp-pagination__pages`, `qp-pagination__page`, `qp-pagination__jump`.
+- Query inspection: `qp-search-lab`, `qp-search-lab__readiness`, `qp-search-lab__grid`, `qp-search-lab__facts`, `qp-search-lab__analysis`, `qp-search-lab__samples`, `qp-code-block`.
+- App surfaces: `qp-menu`, `qp-list`, `qp-project-card`, `qp-market-layout`, `qp-market-card`, `qp-market-inspector`, `qp-chip-list`, `qp-user-card`, `qp-color-swatch`.
+- Settings: `qp-appbar`, `qp-settings-view`, `qp-settings-nav`, `qp-setting-row`, `qp-version-card`, `qp-path-field`.
+- Properties: `qp-properties-panel`, `qp-property-section`, `qp-property-row`, `qp-axis-grid`, `qp-axis-field`, `qp-swatch-input`.
+- Editor panels: `qp-panel-tabs`, `qp-panel-tab`, `qp-split-panel`, `qp-anchor-grid`, `qp-anchor-preset`.
+- Icons: `qp-icon`, `qp-icon-board`, `qp-icon-category`, `qp-icon-grid`, `qp-icon-cell`.
+
+## Modals and dialogs
+
+The package provides framework-agnostic presentation classes. The consuming application owns open state, focus trapping, focus restoration, Escape and backdrop handling, and async busy state.
+
+Use `qp-modal` for create/edit forms. Apply a size modifier and keep the heading, body, and actions in their named regions:
+
+```html
+<div class="qp-modal-backdrop" role="presentation">
+  <section
+    class="qp-modal qp-modal--medium"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="provider-title"
+    aria-describedby="provider-description"
+  >
+    <header class="qp-modal__header">
+      <div class="qp-modal__heading">
+        <h2 id="provider-title">Add provider</h2>
+        <p id="provider-description" class="qp-modal__description">Create a reusable LLM account.</p>
+      </div>
+    </header>
+    <div class="qp-modal__body">Form fields go here.</div>
+    <footer class="qp-modal__footer">
+      <button class="qp-button qp-button--ghost" type="button">Cancel</button>
+      <button class="qp-button qp-button--primary" type="button">Create provider</button>
+    </footer>
+  </section>
+</div>
+```
+
+Use the compact `qp-dialog` surface for a destructive confirmation. A host should expose it as an `alertdialog`, focus the least destructive action first, and prevent dismissal while the destructive request is busy:
+
+```html
+<div class="qp-modal-backdrop" role="presentation">
+  <section
+    class="qp-dialog qp-dialog--danger"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="delete-title"
+    aria-describedby="delete-description"
+  >
+    <div class="qp-dialog__icon" aria-hidden="true">!</div>
+    <div class="qp-dialog__body">
+      <strong id="delete-title">Delete provider?</strong>
+      <p id="delete-description" class="qp-body-2 qp-muted">This action cannot be undone.</p>
+      <div class="qp-dialog__actions">
+        <button class="qp-button qp-button--ghost" type="button" autofocus>Cancel</button>
+        <button class="qp-button qp-button--danger" type="button">Delete provider</button>
+      </div>
+    </div>
+  </section>
+</div>
+```
+
+For destructive dialogs, Escape and the backdrop may cancel only while idle. Disable every dismissal control and set `aria-busy="true"` while the request is in flight. After closing, restore focus to the invoking control or to a stable nearby fallback if that control was deleted.
+
+## Searchable native-select adapter
+
+Use the same runtime as the Neon Void demo and MX Launcher. Keep the original `select` and its option values; the adapter supplies the searchable menu, keyboard interaction and portal placement.
+
+```js
+import '@qpjoy/ui-design-neon-void/styles.css';
+import '@qpjoy/ui-design-neon-void/select.css';
+import { installNeonSelects } from '@qpjoy/ui-design-neon-void/select.js';
+
+// Call after mounting the client DOM. Theme the document body with Neon Void.
+const controls = installNeonSelects(document);
+// For component-scoped integrations, pass the mounted element and call
+// controls.destroy() on unmount. controls.refresh() explicitly reconciles state.
+```
+
+- Enhances single and multiple selects, including fields added by later renders. Retains native `name`, value, FormData (use `getAll` for multiple), required validation and exactly one input/change pair for a changed selection. Multiple menus stay open while toggling choices and support selecting search matches or clearing the selection.
+- Search matches option labels, values and group labels. Disabled options/groups cannot be selected. Arrow keys, Home/End, Enter, Escape and Tab work; IME confirmation does not commit a choice.
+- Reflects option/disabled mutations, form reset, and assignments to `select.value` / `selectedIndex`. After directly changing an individual option's `selected` property without a DOM mutation, dispatch `change` or call `refresh()`.
+- Menus use a body portal, viewport positioning and an upward fallback so scroll panels do not clip them. They inherit resolved Neon Void tokens from the field, including a scoped light theme. No service requests, persistence or authorization logic are part of the component.
+- Single-selection listboxes (`size > 1`) stay native. Use `data-neon-native` to opt out before initialization. Menus inside an open modal stay in its top layer. Call `destroy()` to remove the adapter and restore native fields.
+- Import the adapter once per managed DOM subtree. Do not attach a second adapter to overlapping roots. The CSS-only `qp-dropdown` anatomy remains available for non-select menus.
+
+The desktop copies `styles.css`, `tokens.css`, `select.css` and `select.js` from this source during dev/build. Its production admin asset assembly copies the same canonical files; do not edit generated `desktop/ui-design/` files.
+
+Browser contract checks use an already installed Playwright/Chrome runtime:
+
+```sh
+# Or set MX_PLAYWRIGHT_MODULE to an existing Playwright module path.
+pnpm --dir electron-dock/mx-launcher/ui-design run test:browser
+```
+
+## Demo
+
+From `electron-dock/mx-launcher`:
+
+```sh
+bash scripts/manage.sh ui-design demo
+```
+
+Then open:
+
+```text
+http://127.0.0.1:18130/demos/ui-design-neon-void/
+```
+
+## Publish
+
+From the repository root:
+
+```sh
+./scripts/manage.sh prepare-design
+```
+
+The script bumps, builds, packs a preview tarball, prints the manual `pnpm publish --no-git-checks --otp=...` command, and can publish directly when an OTP is entered.

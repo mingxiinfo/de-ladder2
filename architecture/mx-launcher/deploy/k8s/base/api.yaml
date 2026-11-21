@@ -1,0 +1,183 @@
+# Launcher API（docs/36、docs/46）。从 L1 deploy/k8s/internal-shadow/05、40、30 改写：
+# - 镜像从 architecture/mx-launcher 构建（manage.sh image build），imagePullPolicy IfNotPresent；
+# - 迁移从单独的 Job 改成 initContainer：Job 不能改镜像，每次换版本都要先删；迁移本身是一个事务（runMigrations transaction: all）；
+# - DATABASE_URL 取 CloudNativePG 生成的 pg-launcher-app；
+# - 不再用 env 把 SITE_SLOT_* 设成 1（config.env 里是 0）；
+# - 三个卷从 hostPath PV 改成 local-retain 的 PVC。
+# 先 1 副本：两处 setInterval 定时任务没有选主，2 副本会重复执行（docs/36）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mx-launcher-internal
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal
+    app.kubernetes.io/part-of: mx-3ks
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-launcher-internal-ssh
+  labels: { app.kubernetes.io/name: mx-launcher-internal, app.kubernetes.io/part-of: mx-3ks }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-retain
+  resources: { requests: { storage: 256Mi } }
+---
+# 发布制品体积大。以后可以挪到 NAS：不是数据库，可以放 NFS（docs/20、docs/36）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-launcher-release-artifacts
+  labels: { app.kubernetes.io/name: mx-launcher-internal, app.kubernetes.io/part-of: mx-3ks }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-retain
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-launcher-site-slots
+  labels: { app.kubernetes.io/name: mx-launcher-internal, app.kubernetes.io/part-of: mx-3ks }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-retain
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-launcher-internal
+  labels: { app.kubernetes.io/name: mx-launcher-internal, app.kubernetes.io/part-of: mx-3ks }
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mx-launcher-internal
+  ports:
+    - name: http
+      port: 18090
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-launcher-internal
+  labels: { app.kubernetes.io/name: mx-launcher-internal, app.kubernetes.io/part-of: mx-3ks }
+spec:
+  replicas: 1
+  # 卷是 ReadWriteOnce。单节点上 maxSurge 1 能起新 Pod；有第二个节点后新 Pod 可能调度不到同一台，改成 Recreate 或把卷挪到 NAS
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-launcher-internal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-launcher-internal
+        app.kubernetes.io/part-of: mx-3ks
+    spec:
+      serviceAccountName: mx-launcher-internal
+      initContainers:
+        - name: migrate
+          image: mx-launcher-server
+          imagePullPolicy: IfNotPresent
+          command: [node, dist/src/migrate.js]
+          envFrom:
+            - configMapRef: { name: mx-launcher-internal-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: pg-launcher-app, key: uri } }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 64Mi }
+            limits: { cpu: 500m, memory: 512Mi, ephemeral-storage: 256Mi }
+        - name: seed-site-slot-artifacts
+          image: mx-launcher-server
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+            - /app/scripts/seed-site-slot-artifacts.mjs
+            - --image-dir
+            - /app/artifacts/site-slots
+            - --runtime-dir
+            - /app/runtime-artifacts/site-slots
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+          volumeMounts:
+            - name: site-slots
+              mountPath: /app/runtime-artifacts/site-slots
+      containers:
+        - name: internal-api
+          image: mx-launcher-server
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 18090
+          envFrom:
+            - configMapRef: { name: mx-launcher-internal-config }
+            - secretRef: { name: mx-launcher-admin-sso, optional: true }
+            - secretRef: { name: mx-release-oss, optional: true }
+          env:
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: pg-launcher-app, key: uri } }
+            - name: MX_INTERNAL_OPS_TOKEN
+              valueFrom: { secretKeyRef: { name: mx-internal-ops, key: token } }
+            - name: MX_SERVICE_OPERATIONS_URL
+              valueFrom: { secretKeyRef: { name: mx-service-operations, key: MX_SERVICE_OPERATIONS_URL, optional: true } }
+            - name: MX_SERVICE_OPERATIONS_TOKEN
+              valueFrom: { secretKeyRef: { name: mx-service-operations, key: MX_SERVICE_OPERATIONS_TOKEN, optional: true } }
+            - name: MX_MINCAVE_FEISHU_TENANT_KEY
+              valueFrom: { secretKeyRef: { name: mx-mincave-access, key: tenant-key, optional: true } }
+            - name: MX_MINCAVE_INITIAL_ADMIN_USER_ID
+              valueFrom: { secretKeyRef: { name: mx-mincave-access, key: initial-admin-user-id, optional: true } }
+            - name: MX_FEISHU_APP_ID
+              valueFrom: { secretKeyRef: { name: mx-feishu-oauth, key: app-id, optional: true } }
+            - name: MX_FEISHU_APP_SECRET
+              valueFrom: { secretKeyRef: { name: mx-feishu-oauth, key: app-secret, optional: true } }
+            - name: MX_FEISHU_ALLOWED_TENANT_KEYS
+              valueFrom: { secretKeyRef: { name: mx-feishu-oauth, key: tenant-keys, optional: true } }
+            - name: MX_INSIGHT_HUB_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: mx-insight-hub-admin, key: token, optional: true } }
+            - name: MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON
+              valueFrom: { secretKeyRef: { name: mx-sdk-service-account-secrets, key: secrets.json, optional: true } }
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            failureThreshold: 150
+            periodSeconds: 2
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+            limits: { cpu: 1000m, memory: 1Gi, ephemeral-storage: 1Gi }
+          volumeMounts:
+            - name: identity-ca
+              mountPath: /run/mx-identity-ca
+              readOnly: true
+            - name: internal-ssh
+              mountPath: /app/artifacts/ssh
+            - name: release-artifacts
+              mountPath: /app/artifacts/release-center
+            - name: site-slots
+              mountPath: /app/runtime-artifacts/site-slots
+      volumes:
+        - name: identity-ca
+          secret: { secretName: mx-identity-ca, optional: true }
+        - name: internal-ssh
+          persistentVolumeClaim: { claimName: mx-launcher-internal-ssh }
+        - name: release-artifacts
+          persistentVolumeClaim: { claimName: mx-launcher-release-artifacts }
+        - name: site-slots
+          persistentVolumeClaim: { claimName: mx-launcher-site-slots }

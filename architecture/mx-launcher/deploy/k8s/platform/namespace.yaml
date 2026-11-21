@@ -1,0 +1,43 @@
+# 平台为 mx-launcher 建的命名空间、配额、默认限额（docs/46）。由 app apply 先于 overlay 应用。
+# 名字沿用 L1 的 mx-internal-shadow（docs/36）：Launcher 的代码里写死了这个命名空间
+# （例如网关 Caddyfile 里的 mx-launcher-internal.mx-internal-shadow.svc.cluster.local）。
+# L1 里它是正式环境，不是影子环境（CLAUDE.md）；这里是 s2 上的复刻，环境名是 ladder2。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mx-internal-shadow
+  labels:
+    ladder2/gateway: enabled          # 允许往 Gateway internal 挂路由
+    ladder2/project: mx-launcher
+    app.kubernetes.io/name: mx-launcher
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/environment: ladder2
+    mx.qpjoy.com/site-role: internal
+---
+# 估算：API 1 CPU / 1Gi，pg-launcher 4 CPU / 4Gi（数字沿用 L1 的 limits），Caddy 每台 0.2 CPU，留出滚动更新的余量。
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: quota
+  namespace: mx-internal-shadow
+spec:
+  hard:
+    requests.cpu: "12"
+    requests.memory: 24Gi
+    limits.memory: 48Gi
+    pods: "40"
+    persistentvolumeclaims: "12"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: mx-internal-shadow
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        memory: 512Mi

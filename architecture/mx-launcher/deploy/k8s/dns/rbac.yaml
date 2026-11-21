@@ -1,0 +1,26 @@
+# Launcher 改 mx-dns/coredns 这个 ConfigMap 的权限（管理界面的 DNS 页面 → Apply）。照 L1 25-coredns-rbac.yaml。
+# CoreDNS 的 reload 插件会自己读新配置，不用重启。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mx-coredns-configmap-writer
+  labels: { app.kubernetes.io/name: mx-coredns-configmap-writer, app.kubernetes.io/part-of: mx-3ks }
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["coredns"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mx-launcher-internal-coredns-writer
+  labels: { app.kubernetes.io/name: mx-launcher-internal-coredns-writer, app.kubernetes.io/part-of: mx-3ks }
+subjects:
+  - kind: ServiceAccount
+    name: mx-launcher-internal
+    namespace: mx-internal-shadow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mx-coredns-configmap-writer

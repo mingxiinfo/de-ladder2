@@ -1,0 +1,111 @@
+# 应用网关 mx-internal-gateway 的初始配置。nginx.conf 给 nginx 用（app-gateway.yaml），Caddyfile 是 Launcher 一起生成的，L2 不用。
+# 只在集群里还没有时由 ./scripts/manage.sh app apply / app deploy 建一次，之后归 Launcher 运行时改写，不会被覆盖（docs/47）。
+# 不要手改：改 deploy/k8s/base/config.env 或 Launcher 的生成函数后，跑 architecture/mx-launcher/scripts/manage.sh bootstrap-render。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mx-internal-gateway-caddy
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-internal-gateway
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/component: internal-gateway
+    ladder2/project: mx-launcher
+data:
+  nginx.conf: |
+    # MX-H2I generated host nginx gateway include.
+    # This file is intended to be included from nginx http {} context.
+    map $http_upgrade $mx_gateway_connection_upgrade {
+      default upgrade;
+      '' close;
+    }
+
+    server {
+      listen 18090;
+      server_name internal.mx gateway.internal.mx;
+      add_header X-MX-Gateway internal-host-nginx-api always;
+      location / {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $mx_gateway_connection_upgrade;
+        proxy_pass http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090;
+      }
+    }
+
+    server {
+      listen 80;
+      server_name _;
+      add_header X-MX-Gateway internal-host-nginx always;
+      return 404 "MX Internal gateway route not found\n";
+    }
+  Caddyfile: |
+    {
+      admin off
+      auto_https off
+      servers {
+        trusted_proxies static 192.168.224.0/20 192.168.1.4/32
+        trusted_proxies_strict
+      }
+    }
+
+    :18090 {
+      bind 0.0.0.0
+      encode zstd gzip
+      header {
+        X-MX-Gateway internal-k8s-host-gateway
+      }
+      @domesticEdge {
+        client_ip 10.88.0.1
+        header X-MX-Forwarded-By domestic-edge
+      }
+      handle @domesticEdge {
+        reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090 {
+          header_up X-Forwarded-For {http.request.header.X-MX-Edge-Forwarded-For}
+          header_up -X-MX-Edge-Forwarded-For
+        }
+      }
+      handle {
+        reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090 {
+          header_up X-Forwarded-For {client_ip}
+          header_up -X-MX-Forwarded-By
+          header_up -X-MX-Edge-Forwarded-For
+        }
+      }
+    }
+
+    # mx-gateway-optional-port-80:start
+    :80 {
+      bind 0.0.0.0
+      encode zstd gzip
+      header {
+        X-MX-Gateway internal-app-gateway
+      }
+      handle {
+        respond "MX Internal gateway route not found\n" 404
+      }
+    }
+
+    # mx-gateway-optional-port-80:end
+
+    :8008 {
+      bind 0.0.0.0
+      encode zstd gzip
+      header {
+        X-MX-Gateway internal-app-gateway-fallback
+      }
+      handle {
+        respond "MX Internal gateway route not found\n" 404
+      }
+    }
+  mx-gateway-routes.json: |
+    {
+      "environment": "ladder2",
+      "siteId": "internal-main",
+      "gatewayPort": 80,
+      "routeCount": 0,
+      "routes": []
+    }

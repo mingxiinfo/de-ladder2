@@ -1,0 +1,163 @@
+# s2 的宿主机 Nginx（host-nginx）：80 端口的唯一主人（docs/05、docs/23）。没有实测。
+# 由 ./scripts/manage.sh node prepare s2 host-nginx 渲染后装到 /etc/nginx/conf.d/ladder2.conf（docs/35）。
+# 改这个模板再重新 prepare，不要直接改服务器上的文件：重新 prepare 会覆盖它（旧的留一份 .ladder2-<时间>）。
+# 占位：@LAN_IP@ 本机 LAN 地址；@PUBLIC_PORT@ / @INTERNAL_PORT@ 两个 Gateway 的 NodePort（versions.env）。
+#
+# 转到 NodePort 用本机 LAN 地址，不用 127.0.0.1：kube-proxy 的 nftables 模式不支持回环地址上的 NodePort，
+# iptables 模式要靠 route_localnet 才行，不依赖它（docs/35）。
+
+# 请求编号：上游带了就沿用，没带就生成。每一层原样往后传，并记进访问日志（docs/26）。
+map $http_x_request_id $ladder2_rid {
+    default $http_x_request_id;
+    ""      $request_id;
+}
+# 边缘写了协议就沿用，办公网直连时用本层的
+map $http_x_forwarded_proto $ladder2_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
+# rt 是这一层总共花的时间，urt 是后面所有层花的时间，差就是这一层自己的开销。
+log_format ladder2 '$time_iso8601 $ladder2_rid $remote_addr $host "$request" $status '
+                   'rt=$request_time uct=$upstream_connect_time '
+                   'uht=$upstream_header_time urt=$upstream_response_time';
+
+# 到网关的长连接。1000 QPS 时不能每个请求都新建连接（docs/09）。
+upstream ladder2_public {
+    server @LAN_IP@:@PUBLIC_PORT@;
+    keepalive 256;
+    keepalive_requests 100000;
+    keepalive_timeout 60s;
+}
+upstream ladder2_internal {
+    server @LAN_IP@:@INTERNAL_PORT@;
+    keepalive 256;
+    keepalive_requests 100000;
+    keepalive_timeout 60s;
+}
+
+# H2I 客户端：Launcher 产品网络的地址（10.89 起，docs/41）。10.88 是 Launcher 的中继和 L2 的边缘隧道，不算。
+geo $ladder2_from_h2i {
+    default        0;
+    10.0.0.0/8     1;
+    10.88.0.0/16   0;
+}
+
+# 没有登记的域名：只回健康检查，其余 404。
+# 例外：H2I 客户端访问 Launcher 发布的内网应用（域名由分流 DNS 解析到 service peer 地址）→ Gateway internal
+# → 兜底路由 mx-launcher-apps → 应用网关（nginx）按域名转发（docs/47，docs/15 第 74 项）。
+# 按来源分，不按地址分：10.88.88.89:80 同时是 domestic02 回源的地址，从边缘来的仍然 404。
+server {
+    listen 80 default_server;
+    server_name _;
+    access_log /var/log/nginx/ladder2.access.log ladder2 buffer=64k flush=5s;
+    location = /gateway-health { access_log off; return 200 "ok\n"; }
+    location / {
+        error_page 418 = @ladder2_h2i_app;
+        if ($ladder2_from_h2i) { return 418; }
+        return 404;
+    }
+    location @ladder2_h2i_app {
+        proxy_pass http://ladder2_internal;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ladder2_proto;
+        proxy_set_header X-Request-Id $ladder2_rid;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+    }
+}
+
+# L1 的 Caddy 在 80 被占时退到 8008，客户端里可能写着 8008：同样只给 H2I 客户端，转到应用网关。
+server {
+    listen 8008;
+    server_name _;
+    access_log /var/log/nginx/ladder2.access.log ladder2 buffer=64k flush=5s;
+    location / {
+        if ($ladder2_from_h2i = 0) { return 403; }
+        proxy_pass http://ladder2_internal;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ladder2_proto;
+        proxy_set_header X-Request-Id $ladder2_rid;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+    }
+}
+
+# 进了 L2 集群的域名 → Gateway public。每迁一个项目，在 server_name 里加一个（docs/23）。
+server {
+    listen 80;
+    server_name sample.ladder2.internal;
+    access_log /var/log/nginx/ladder2.access.log ladder2 buffer=64k flush=5s;
+
+    location / {
+        proxy_pass http://ladder2_public;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        # 原样传递边缘写入的客户端地址；办公网直连时没有这个头，就用直连地址。
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $ladder2_proto;
+        proxy_set_header X-Request-Id $ladder2_rid;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 300s;
+        proxy_buffering off;      # 流式响应逐块转发
+    }
+}
+
+# Launcher API（architecture/mx-launcher，docs/46、docs/47）→ Gateway internal → Launcher，不再经过应用网关。
+# H2I 客户端访问 http://<service peer>:18090（docs/47 第 2 条），办公网可以用 http://<LAN>:18090。
+# 听所有地址而不是只听 WG 地址：WG 网卡不在时 nginx 也要能启动，不能把 80 上的站点一起带停。
+# 这一层替 L1 的 Caddy 判断"是不是 Domestic 中继转来的"：只有来源是 10.88.0.1、还带着
+# X-MX-Forwarded-By: domestic-edge 的才算，沿用它带来的 X-Forwarded-For（公网用户的地址）；
+# 其余请求的 X-Forwarded-For 改写成直连地址（客户端自己填的不算），并清掉 X-MX-Forwarded-By。
+# Launcher 按 MX_HTTP_TRUST_PROXY_CIDRS 信任网关和本机，从右往左取客户端（server/src/lib/trust-proxy.ts）。
+map "$remote_addr|$http_x_mx_forwarded_by" $ladder2_launcher_edge {
+    default                    0;
+    "10.88.0.1|domestic-edge"  1;
+}
+map $ladder2_launcher_edge $ladder2_launcher_edge_by  { 1 "domestic-edge";       default ""; }
+map $ladder2_launcher_edge $ladder2_launcher_edge_xff { 1 $http_x_forwarded_for; default ""; }
+map $ladder2_launcher_edge_xff $ladder2_launcher_xff  { ""  $remote_addr;         default $ladder2_launcher_edge_xff; }
+
+server {
+    listen 18090;
+    server_name _;
+    access_log /var/log/nginx/ladder2.access.log ladder2 buffer=64k flush=5s;
+    # 只给内网：Launcher 的 10.* 网段（中继、产品网络）、LAN、本机
+    allow 10.0.0.0/8;
+    allow 192.168.0.0/16;
+    allow 127.0.0.1;
+    deny all;
+
+    location / {
+        proxy_pass http://ladder2_internal;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        # Gateway API 的 hostnames 不能写 IP，统一换成这个名字（architecture/mx-launcher/deploy/k8s/base/route.yaml）
+        proxy_set_header Host launcher.ladder2.internal;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-For $ladder2_launcher_xff;
+        proxy_set_header X-Forwarded-Proto $ladder2_proto;
+        proxy_set_header X-Request-Id $ladder2_rid;
+        # 值为空时 nginx 不发这个头，客户端自己带的也就丢掉了
+        proxy_set_header X-MX-Forwarded-By $ladder2_launcher_edge_by;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+    }
+}
+
+# 只对内网开放的应用 → Gateway internal（docs/18）。这个 server 只听 LAN 地址。
+# server {
+#     listen @LAN_IP@:80;
+#     server_name some-app.ladder2.internal;
+#     location / { proxy_pass http://ladder2_internal; ...同上... }
+# }

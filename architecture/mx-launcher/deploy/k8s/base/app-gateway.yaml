@@ -1,0 +1,125 @@
+# 应用网关 mx-internal-gateway：H2I 用户访问 Launcher 发布的内网应用走这里（docs/47）。
+# L1 是 Caddy（hostNetwork，占 18090、8008、80）。L2 换成 nginx（docs/18 第 3 条、docs/23 第 4 条）：
+# - Launcher 发布路由时往同一个 ConfigMap 里同时写 Caddyfile 和 nginx.conf
+#   （server/src/store/domain.ts 的 buildGatewayConfigMap），这里读 nginx.conf，Launcher 的代码不用改；
+# - Launcher API 不再经过它：HTTPRoute mx-launcher-api 直接到 Service mx-launcher-internal（route.yaml）；
+# - 名字和类型不变（DaemonSet mx-internal-gateway）：Launcher 改完 ConfigMap 后去 patch 它触发滚动
+#   （server/src/store/kubernetes.ts 的 triggerInternalGatewayRollout）；
+# - 不占宿主机端口（docs/18）。滚动时先起新的、就绪了再停旧的（maxSurge 1）：
+#   新配置有错（比如某个路由的后端域名解析不了，nginx 启动时就会失败），旧的 Pod 继续服务。
+# Caddyfile 的 ConfigMap 在 ../bootstrap/，归 Launcher 运行时改写，app apply 只在没有时建一次。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mx-internal-gateway-configmap-writer
+  labels: { app.kubernetes.io/name: mx-internal-gateway-configmap-writer, app.kubernetes.io/part-of: mx-3ks }
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["mx-internal-gateway-caddy"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["mx-internal-gateway"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mx-launcher-internal-gateway-writer
+  labels: { app.kubernetes.io/name: mx-launcher-internal-gateway-writer, app.kubernetes.io/part-of: mx-3ks }
+subjects:
+  - kind: ServiceAccount
+    name: mx-launcher-internal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mx-internal-gateway-configmap-writer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-internal-gateway
+  labels: { app.kubernetes.io/name: mx-internal-gateway, app.kubernetes.io/part-of: mx-3ks }
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mx-internal-gateway
+  ports:
+    - { name: app-http, port: 80, targetPort: app-http }
+    # L1 的 Caddy 在 80 被占时退到 8008。客户端里可能写着 8008，同样转到 80
+    - { name: app-fallback, port: 8008, targetPort: app-http }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mx-internal-gateway
+  labels:
+    app.kubernetes.io/name: mx-internal-gateway
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/component: internal-gateway
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-internal-gateway
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-internal-gateway
+        app.kubernetes.io/part-of: mx-3ks
+        mx.qpjoy.com/component: internal-gateway
+    spec:
+      containers:
+        - name: gateway
+          image: nginx:1.27.5-alpine
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -ec]
+          # Launcher 生成的 nginx.conf 是给 http {} 里 include 的片段，监听 GATEWAY_APP_PORT（80）。
+          # 它最后那个 server_name _ 没写 default_server，nginx 会把第一个路由当默认站点，
+          # 所以这里补一个 default_server 回 404，再加一个 8081 的健康检查。
+          args:
+            - |
+              rm -f /etc/nginx/conf.d/*.conf
+              cp /etc/mx-gateway/nginx.conf /etc/nginx/conf.d/10-mx-gateway.conf
+              cat >/etc/nginx/conf.d/00-default.conf <<'EOF'
+              server {
+                listen 80 default_server;
+                add_header X-MX-Gateway internal-app-gateway always;
+                return 404 "MX Internal gateway route not found\n";
+              }
+              server {
+                listen 8081;
+                location = /healthz { access_log off; return 200 "ok\n"; }
+              }
+              EOF
+              nginx -t
+              exec nginx -g 'daemon off;'
+          ports:
+            - { name: app-http, containerPort: 80, protocol: TCP }
+            - { name: health, containerPort: 8081, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi, ephemeral-storage: 128Mi }
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/mx-gateway
+              readOnly: true
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: mx-internal-gateway-caddy

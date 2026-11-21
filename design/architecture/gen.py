@@ -254,3 +254,45 @@ cards=[
  {"dot":"emerald","title":"坏了会怎样","items":["隧道断了：缓存里的照读，新写的排队","内网断了：能登录、看历史，新查询失败"]},
 ]
 doc("06-toc-oversea","toC 站点 · arguseek 和 Delta 在一台云服务器上","设计（docs/33、34），区域待定，没有登录过服务器",6,comps,conns,bounds,cards)
+
+# ---------- 07 边缘机器：从任意一台 Internal 推送部署 ----------
+comps=[
+ C("launcher","backend","Launcher","site-slot SSH 档案",0,0),
+ C("home1","database","internal01 的 home","名字 · state/ · 台账",0,1),
+ C("home2","database","internal02 的 home","名字 · state/ · 台账",0,2),
+ C("stacks","backend","技术栈","wg / open / hy2 · 镜像固定",0,3),
+ C("o1","backend","qp-tunnel-cli edge","internal01 · s1 · CentOS 8",1,1),
+ C("o2","backend","qp-tunnel-cli edge","internal02 · s2 · Ubuntu",1,2),
+ C("rel","frontend","edge relations","推送机 → 机器 → 组件",1,3),
+ C("jump","security","跳板机","可选 · 可多级",2,1),
+ C("pre","security","preflight","系统族 · 谁管 · 别的工具",3,0),
+ C("relz","database","releases/组件/版本","不覆盖 · 带 .edge-state",3,1),
+ C("cur","backend","current/组件","deploy.sh → health.sh",3,2),
+ C("own","database",".edge-origin","谁管 · 换人要 --take-over",3,3),
+ C("d1","cloud","domestic01","internal01 管",4,0),
+ C("d2","cloud","domestic02","internal02 管 · wg-nginx",4,1),
+ C("d3","cloud","domestic03","internal02 管 · internal03 同理",4,2),
+ C("ov","cloud","Oversea","hy2-mihomo",4,3),
+ C("s2hn","backend","s2 host-nginx","edge link 回源",5,1),
+]
+conns=[
+ L("launcher","o1","edge import"), L("launcher","o2","edge import"),
+ L("home1","o1"), L("home2","o2"), L("stacks","o2","--stack"),
+ L("o2","rel","只读"),
+ L("o1","jump","SSH 上传",True), L("o2","jump","SSH 上传",True),
+ L("jump","pre","解包到 incoming",True),
+ L("pre","relz","通过才写 state"), L("relz","cur","切链接"), L("cur","own","记下推送机"),
+ L("cur","d1"), L("cur","d2"), L("cur","d3"), L("cur","ov"),
+ L("d2","s2hn","只走 Domestic → Internal",True),
+]
+bounds=[
+ {"kind":"region","label":"Internal · 每台都可以是推送机","wraps":["launcher","home1","home2","stacks","o1","o2","rel"]},
+ {"kind":"region","label":"每台边缘机器上 /opt/mx","wraps":["pre","relz","cur","own"]},
+ {"kind":"region","label":"推出去的机器 · 不进集群","wraps":["d1","d2","d3","ov"]},
+]
+cards=[
+ {"dot":"cyan","title":"两台推送机","items":["各有名字和 edge home，互不覆盖","机器记着谁管哪个组件，换人要 --take-over","edge relations 列出推送机 → 机器 → 组件"]},
+ {"dot":"amber","title":"配置目录和隧道","items":["/var/lib/qp-tunnel/edge/state/机器/组件","不进包、不进 Git；丢了用 state pull 拿回","edge link：domestic02 10.88.0.2 → s2 10.88.88.89（只路由 /32）"]},
+ {"dot":"emerald","title":"不动线上","items":["现在那台 domestic-main 有 v1 组件，整台不推","主机上不删；回退连 state 一起切回","hy2 镜像固定：v2.14.0、2.11.9-alpine"]},
+]
+doc("07-edge","边缘机器 · 从任意一台 Internal 经 SSH 推送","设计 + 本机容器实测（docs/37–44）；internal02 → domestic02 已在真机上通",6,comps,conns,bounds,cards)

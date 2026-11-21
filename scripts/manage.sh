@@ -9,6 +9,8 @@ cd "$ROOT"
 INV_PROJECTS="inventory/projects.yaml"
 INV_HOSTS="inventory/hosts.yaml"
 K8S="infra/k8s"
+# shellcheck source=../infra/k8s/versions.env
+source "$K8S/versions.env"
 
 if [[ -t 1 ]]; then B=$'\033[1m'; D=$'\033[2m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; O=$'\033[0m'
 else B=""; D=""; G=""; Y=""; R=""; O=""; fi
@@ -31,24 +33,39 @@ ${B}只读${O}
   doctor                    本机工具；在服务器上还检查磁盘、NAS 挂载、端口
   k8s render <目录>         打印渲染后的清单，例如 k8s render platform/gateway
   k8s status --context <名字>   节点、网关、数据库集群的状态
+  k8s capacity --context <名字> 每台节点可分配、被 requests 占了多少、实际用量、标签和污点、本地卷在哪台（docs/47）
+  node verify <主机> [阶段] [--context <名字>]   逐个阶段检查做完没有，服务起来没有（docs/35）
   l1 <list|plan|status|doctor> [参数]   转调 L1 的统一入口（只放行只读命令）
-  app list | app render <名字> [环境]   services/ 和 projects/ 下的清单
-  node plan <主机>          这台机器按它的角色要做哪些步骤
+  app list | app render <名字> [环境]   architecture/、services/、projects/ 下的清单（docs/46）
+  app status <项目> [环境] --context <名字>   项目在集群里的状态：工作负载、卷、路由、数据库、Secret 有没有
+  image list <项目>         overlay 要的镜像，本机 docker 和 containerd 里有没有
+  secret plan <项目> --from <目录> [--context <名字>]   对照 deploy/secrets.list 看缺什么（不显示值）
+  node plan <主机>          这台机器按它的角色要做哪些步骤；s2 是 14 个阶段的表
   backup plan               备份什么、用什么、放哪（inventory/backup.yaml）
   disk record | disk trend  记录本机磁盘用量 / 按记录算增长和余量
   probe url <地址> [--host <域名>]      测一个地址各阶段的耗时（只发 GET）
   probe list | probe route <名字>       inventory/probes.yaml 登记的链路，逐层测并对比
   probe wg                  本机 WireGuard 各对端的最近握手时间
+  loadtest results          每条链路每一层最近一次压测的结果
 
 ${B}写入${O}（必须指名目标）
-  k8s platform <gateway|postgres> --context <名字>   往指定集群装平台组件
-  app diff|apply <项目> [环境] --context <名字>      对比 / 部署一个项目
+  node prepare <主机> <阶段> [--context <名字>]      做一个阶段（一次一个）。机器上的阶段要在那台机器上 sudo 运行（docs/35）
+  k8s platform <组件> --context <名字>               往指定集群装平台组件：flannel、local-path、metrics-server、gateway、postgres
+  loadtest run <链路> --hop <层> [--rate 1000] --context <名字>   压一层：service、gateway、host-nginx、edge（docs/35）
+  loadtest pg [--rate 1000] [--mode select|write] --context <名字>  压 pg-common
+  app deploy <项目> [环境] [--full] --context <名字> 一次完整的部署：检查 → 没跑过的一次性步骤 → apply → 等滚动 → 验证，每段计时（docs/47）
+  app diff|apply <项目> [环境] --context <名字>      对比 / 只 apply（先 platform/，再 bootstrap/ 里没有的，再 overlay）
+  app once list|run|mark|archive <项目> [步骤] --context <名字>   一次性步骤：看台账、重跑、只记账、归档到 once/archive/
+  image build <项目> [--platform linux/amd64]        从项目的 Dockerfile 构建，镜像名和版本号取 overlay 的 images:
+  image save <项目> --out <文件>                     导出镜像，拷到没有 docker 的节点上用
+  image import <项目> [--tar <文件>] --context <名字>  导入本节点的 containerd（sudo，每个节点各一次；还没有镜像仓库，docs/15 第 45 项）
+  secret apply <项目> --from <目录> --context <名字>  从推送机本地目录建 Secret，值不打印、不进 Git
   run <项目> <命令...>                               转调该项目自己的 scripts/manage.sh
   diagrams [名字]                                    用 archify 生成 docs/atlas 和 design/architecture 的图
   design stage|serve|build|up|stop|status|export     查看设计文档的站点（工具，不属于架构）：组装、预览、打镜像、启动（docs/31、32）
                             内网服务器出网：PROXY=http://127.0.0.1:7788 ./scripts/manage.sh design build
 
-${D}还没实现：node prepare|join、backup run|verify、restore、loadtest（docs/17、docs/19）；控制台（docs/26）${O}
+${D}还没实现：node join、node prepare 通过 SSH 远程执行、backup run|verify、restore（docs/17、docs/19）；控制台（docs/26）${O}
 EOF
 }
 
@@ -118,14 +135,14 @@ cmd_check() {
   local f
   while read -r f; do
     if bash -n "$f" 2>/dev/null; then ok "$f"; else bad "$f"; fi
-  done < <(find scripts infra templates -name '*.sh' -type f | sort)
+  done < <({ find scripts infra templates -name '*.sh' -type f; find architecture -path '*/scripts/manage.sh' -type f 2>/dev/null; } | sort)
 
   echo "${B}清单渲染${O}"
   if command -v kubectl >/dev/null; then
     while read -r f; do
       # base 目录只被 overlay 引用，单独渲染也应通过
       if kubectl kustomize "$(dirname "$f")" >/dev/null 2>&1; then ok "$(dirname "$f")"; else bad "$(dirname "$f")"; fi
-    done < <(find infra templates services projects -name kustomization.yaml | sort)
+    done < <(find infra templates services projects architecture -name kustomization.yaml -not -path '*/node_modules/*' 2>/dev/null | sort)
   else
     warn "未找到 kubectl，跳过"
   fi
@@ -146,6 +163,13 @@ cmd_check() {
   done < <(grep -oE '\]\([^)#:]+\.md\)' -r docs README.md CLAUDE.md 2>/dev/null | sed -E 's/\]\(([^)]+)\)/\1/')
   ok "Markdown 相对链接"
 
+  echo "${B}压测脚本${O}"
+  if command -v node >/dev/null; then
+    local tmpjs; tmpjs="$(mktemp -d)/http.mjs"; cp scripts/loadtest/http.js "$tmpjs"
+    if node --check "$tmpjs" 2>/dev/null; then ok "scripts/loadtest/http.js 语法"; else bad "scripts/loadtest/http.js 语法错误"; fi
+    rm -rf "$(dirname "$tmpjs")"
+  else warn "未找到 node，跳过 k6 脚本的语法检查"; fi
+
   echo "${B}查看站点${O}"
   if python3 -m json.tool design/site/timeline.json >/dev/null 2>&1; then ok "design/site/timeline.json 是合法的 JSON"
   else bad "design/site/timeline.json 不是合法的 JSON"; fi
@@ -160,6 +184,16 @@ cmd_check() {
   if grep -q "podSubnet: $POD_CIDR" "$K8S/cluster/kubeadm-init.yaml" && grep -q "serviceSubnet: $SERVICE_CIDR" "$K8S/cluster/kubeadm-init.yaml"; then
     ok "kubeadm-init.yaml 的网段与 versions.env 一致"
   else bad "kubeadm-init.yaml 的网段与 versions.env 不一致"; fi
+  local ph
+  ph="$(grep -v '^#' "$K8S/cluster/kubeadm-init.yaml" | grep -o '@[A-Z0-9_]*@' | sort -u | tr '\n' ' ')"
+  if [[ "$ph" == "@IMAGE_REPOSITORY@ @K8S_VERSION@ @LAN_IP@ @NODE_NAME@ @WG_IP@ " ]]; then ok "kubeadm-init.yaml 的占位都是 40-cluster.sh 会替换的"
+  else bad "kubeadm-init.yaml 的占位和 40-cluster.sh 对不上：$ph"; fi
+  local s2ip cni0; s2ip="$(host_field s2 lan_ip)"
+  cni0="${POD_CIDR%/*}"; cni0="${cni0%.*}.1"   # 第一个节点分到 Pod 网段的第一个 /24，cni0 是其中的 .1
+  if grep -q "value: $s2ip/32" "$K8S/platform/gateway/ngf-values.yaml" && grep -q "value: $cni0/32" "$K8S/platform/gateway/ngf-values.yaml"; then
+    ok "网关信任的来源地址包含 s2 的 $s2ip 和 cni0 的 $cni0（docs/35）"
+  else bad "ngf-values.yaml 的 trustedAddresses 和 s2 的地址、Pod 网段对不上"; fi
+  check_launcher_consistency "$s2ip"
 
   echo
   if (( FAILED )); then die "检查没有通过。"; fi
@@ -222,6 +256,14 @@ need_context() { # 从参数里取 --context。写操作必须指名集群，不
   done
   [[ -n "$ctx" ]] || die "必须带 --context <名字>。s1 和 s2 是两个集群，这里不使用默认 context。"
   kubectl config get-contexts -o name 2>/dev/null | grep -qx "$ctx" || die "kubeconfig 里没有 context：$ctx"
+  # 写操作不碰 s1 的集群（L1）：context 指向的 API 地址是 s1 的就拒绝
+  local cl server ip
+  cl="$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$ctx\")].context.cluster}")"
+  server="$(kubectl config view -o jsonpath="{.clusters[?(@.name==\"$cl\")].cluster.server}")"
+  server="${server#*://}"; server="${server%%:*}"
+  for ip in "$(host_field s1 lan_ip)" "$(host_field s1 wg_ip)" "$(host_field s1 openvpn_ip)"; do
+    [[ -z "$ip" || "$server" != "$ip" ]] || die "context $ctx 指向 s1（$server）。本工程的写命令不碰 L1 的集群（CLAUDE.md）。"
+  done
   echo "$ctx"
 }
 
@@ -237,18 +279,21 @@ cmd_k8s() {
       [[ -n "${1:-}" && -f "$K8S/$1/kustomization.yaml" ]] || die "用法：k8s render <目录>，例如 platform/gateway"
       kubectl kustomize "$K8S/$1" ;;
     platform)
-      [[ "${1:-}" == gateway || "${1:-}" == postgres ]] || die "用法：k8s platform <gateway|postgres> --context <名字>"
+      [[ "${1:-}" =~ ^(flannel|local-path|metrics-server|gateway|postgres)$ ]] \
+        || die "用法：k8s platform <flannel|local-path|metrics-server|gateway|postgres> --context <名字>"
       local comp="$1" ctx; ctx="$(need_context "$@")"
       echo "将往集群 ${B}$ctx${O} 安装 ${B}$comp${O}（版本见 $K8S/versions.env）。"
       confirm "这会修改集群。"
-      bash "$K8S/platform/install.sh" "$comp" "$ctx" ;;
+      PROXY="${PROXY:-}" bash "$K8S/platform/install.sh" "$comp" "$ctx" ;;
+    capacity)
+      k8s_capacity "$(need_context "$@")" ;;
     status)
       local ctx; ctx="$(need_context "$@")"
       local k=(kubectl --context "$ctx" --request-timeout=10s)
       echo "${B}节点${O}";       "${k[@]}" get nodes -o wide || { echo "UNKNOWN：连不上集群 $ctx"; exit 2; }
       echo "${B}网关${O}";       "${k[@]}" get gateway,httproute -A 2>/dev/null || echo "  UNKNOWN 或未安装"
       echo "${B}数据库集群${O}"; "${k[@]}" get clusters.postgresql.cnpg.io -A 2>/dev/null || echo "  UNKNOWN 或未安装" ;;
-    *) die "用法：k8s render <目录> | status --context <名字> | platform <gateway|postgres> --context <名字>" ;;
+    *) die "用法：k8s render <目录> | status|capacity --context <名字> | platform <组件> --context <名字>" ;;
   esac
 }
 
@@ -272,47 +317,7 @@ cmd_run() {
   ( cd "$dir" && bash scripts/manage.sh "$@" )
 }
 
-# services/：L2 自己负责的服务（迁过来的 MX 项目、平台服务）。projects/：别人的业务项目。docs/27。
-SERVICES_DIR="$ROOT/services"
-PROJECTS_DIR="${LADDER2_PROJECTS_DIR:-$ROOT/projects}"
-
-app_overlay() { # app_overlay <项目> [环境] → kustomize 目录
-  local proj="${1:-}" env="${2:-production}"
-  [[ -n "$proj" ]] || die "缺少项目名。app list 看有哪些。"
-  local base dir
-  for base in "$SERVICES_DIR" "$PROJECTS_DIR"; do
-    dir="$base/$proj/deploy/k8s/overlays/$env"
-    if [[ -f "$dir/kustomization.yaml" ]]; then echo "$dir"; return 0; fi
-  done
-  die "services/ 和 projects/ 下都没有 $proj/deploy/k8s/overlays/$env/kustomization.yaml（非 k8s 的看它目录下的 README.md）"
-}
-
-cmd_app() {
-  local sub="${1:-list}"; shift || true
-  [[ -d "$PROJECTS_DIR" ]] || die "找不到项目清单目录：$PROJECTS_DIR"
-  local args=() a
-  for a in "$@"; do [[ "$a" == --context* ]] && break; args+=("$a"); done
-  # 第二个位置参数如果是 --context 的值，不当成环境
-  case "$sub" in
-    list)
-      local d n=0
-      for d in "$SERVICES_DIR"/*/ "$PROJECTS_DIR"/*/; do
-        if [[ -d "$d" ]]; then printf "%-10s %s\n" "$(basename "$(dirname "$d")")" "$(basename "$d")"; n=$((n+1)); fi
-      done
-      if (( n == 0 )); then echo "（还没有。自己的服务：cp -r templates/project services/<名字>；别人的项目放 projects/。见 docs/27）" >&2; fi ;;
-    render)
-      kubectl kustomize "$(app_overlay "${args[0]:-}" "${args[1]:-}")" ;;
-    diff)
-      local dir ctx; dir="$(app_overlay "${args[0]:-}" "${args[1]:-}")"; ctx="$(need_context "$@")"
-      kubectl --context "$ctx" diff -k "$dir" || true ;;
-    apply)
-      local dir ctx; dir="$(app_overlay "${args[0]:-}" "${args[1]:-}")"; ctx="$(need_context "$@")"
-      echo "▶ 与集群 ${B}$ctx${O} 的差异："
-      kubectl --context "$ctx" diff -k "$dir" || true
-      kubectl --context "$ctx" apply -k "$dir" ;;
-    *) die "用法：app list | render <项目> [环境] | diff|apply <项目> [环境] --context <名字>" ;;
-  esac
-}
+# app、image、secret 在 scripts/lib/apps.sh（docs/46）。
 
 # ---------- node / backup / disk ----------
 
@@ -327,8 +332,10 @@ cmd_node() {
   local sub="${1:-}" host="${2:-}"
   case "$sub" in
     plan) ;;
-    prepare|join) die "node $sub 还没实现（docs/17）。现在按 docs/14 手工做，角色脚本的约定在 scripts/roles/README.md。" ;;
-    *) die "用法：node plan <主机>。主机名见 hosts。" ;;
+    prepare) shift 2 || true; stage_check_host "$host"; stage_prepare "$host" "$@"; return ;;
+    verify)  shift 2 || true; stage_check_host "$host"; stage_verify "$host" "$@"; return ;;
+    join) die "node join 还没实现（docs/17）。加节点的步骤在 infra/k8s/cluster/kubeadm-join.md。" ;;
+    *) die "用法：node plan|verify <主机> [阶段] | node prepare <主机> <阶段>。主机名见 hosts，阶段见 node plan s2。" ;;
   esac
   local role; role="$(host_field "$host" role)"
   [[ -n "$role" ]] || die "inventory/hosts.yaml 里没有主机：${host:-（空）}"
@@ -339,6 +346,10 @@ cmd_node() {
     l1) echo "  这是现役的旧集群。本工程不对它做任何准备或加入操作（docs/16）。"; return 0 ;;
     storage) echo "  存储设备，不由脚本配置。"; return 0 ;;
   esac
+  if [[ "$role" == control ]]; then
+    echo "  控制面按阶段做，每个阶段一条命令做、一条命令验（docs/35）："
+    stage_plan "$host"; return 0
+  fi
   echo "${D}共同步骤${O}"
   s "主机名、时间同步、内核参数"
   s "磁盘：按 docs/16 分卷（etcd 单独的卷）"
@@ -346,13 +357,6 @@ cmd_node() {
   s "隧道：qp-tunnel-cli 或 WireGuard（docs/08、docs/17）"
   echo "${D}角色 $role${O}"
   case "$role" in
-    control)
-      s "containerd、kubeadm v1.36"
-      s "kubeadm init --config infra/k8s/cluster/kubeadm-init.yaml"
-      s "flannel、local-path-provisioner"
-      s "备份定时任务（docs/19），在部署任何业务之前"
-      s "./scripts/manage.sh k8s platform gateway|postgres --context ladder2"
-      s "宿主机 Nginx：infra/nginx/host-ladder2.conf.example" ;;
     node)
       s "containerd、kubeadm v1.36"
       s "kubeadm join（infra/k8s/cluster/kubeadm-join.md）"
@@ -441,7 +445,7 @@ cmd_diagrams() {
 # ---------- probe ----------
 # 链路探测（docs/26）。只发 GET 请求，不改任何东西。不通就说不通并返回非零。
 
-INV_PROBES="inventory/probes.yaml"
+INV_PROBES="${LADDER2_PROBES:-inventory/probes.yaml}"   # LADDER2_PROBES 只给本机测试脚本用
 
 probe_field() { # probe_field <链路> <字段>
   awk -v r="$1" -v f="$2" '
@@ -765,6 +769,14 @@ cmd_design() {
   esac
 }
 
+# s2 的落地阶段（node prepare / verify）和压测（docs/35）
+# shellcheck source=lib/stages.sh
+source "$ROOT/scripts/lib/stages.sh"
+# shellcheck source=lib/loadtest.sh
+source "$ROOT/scripts/lib/loadtest.sh"
+# shellcheck source=lib/apps.sh
+source "$ROOT/scripts/lib/apps.sh"
+
 main() {
   local cmd="${1:-help}"; shift || true
   case "$cmd" in
@@ -778,11 +790,14 @@ main() {
     l1) cmd_l1 "$@" ;;
     run) cmd_run "$@" ;;
     app) cmd_app "$@" ;;
+    image) cmd_image "$@" ;;
+    secret) cmd_secret "$@" ;;
     node) cmd_node "$@" ;;
     backup) cmd_backup "$@" ;;
     disk) cmd_disk "$@" ;;
     diagrams) cmd_diagrams "$@" ;;
     probe) cmd_probe "$@" ;;
+    loadtest) cmd_loadtest "$@" ;;
     design) cmd_design "$@" ;;
     *) usage; die "未知命令：$cmd" ;;
   esac

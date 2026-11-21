@@ -1,0 +1,31 @@
+# pg-launcher：Launcher 自己的库，一级库，不和别的库合并（docs/22、docs/27、docs/36）。
+# L1 是 postgres:16-alpine 的 StatefulSet 加 hostPath；这里改成 CloudNativePG，写法和 pg-common 一样
+# （infra/k8s/platform/postgres/cluster.yaml）。CloudNativePG 由 ./scripts/manage.sh k8s platform postgres 装。
+# CloudNativePG 自己生成 Secret pg-launcher-app（username、password、dbname、host、uri…），
+# API 的 DATABASE_URL 直接取它的 uri，不用另建数据库凭据。
+# 有第二个节点后 instances 改成 2，建一个流复制副本（docs/36 的高可用表）。
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg-launcher
+  labels:
+    app.kubernetes.io/name: pg-launcher
+    app.kubernetes.io/part-of: mx-3ks
+spec:
+  instances: 1
+  storage:
+    # 估算：L1 的 PVC 是 2Gi。登录、审计、租约都写这里，留够余量
+    size: 20Gi
+    storageClass: local-retain     # 删 PVC 不删数据（docs/35）
+  # requests 和 limits 相同：数据库不和别的 Pod 抢资源。数字取 L1 的 limits（L1 注释：1 CPU 时压测被限流）
+  resources:
+    requests:
+      cpu: "4"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+  bootstrap:
+    initdb:
+      database: mx_launcher
+      owner: mx_launcher

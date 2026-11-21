@@ -1,0 +1,80 @@
+# mx-internal-coredns：H2I 客户端的分流 DNS（docs/47）。照 L1 deploy/k8s/internal-shadow/15-dns-control-target.yaml：
+# - Service 用 externalIPs 把 <service peer 地址>:53 交给 kube-proxy 转到 CoreDNS，不用 hostPort，也不占 NodePort
+#   （docs/18 只给 HTTP 留了两个 NodePort）。kube-proxy 会一直对账这条转发，防火墙重载后也会补回来（L1 的注释）。
+#   这回答了 docs/15 第 49 项，和当时"NodePort 加 host-nginx stream"的建议不同：L1 的做法更少一跳，也不用新端口。
+# - 地址是 Launcher 的 Internal 角色地址 10.88.88.88，跟着角色走，s2 那套也用它（用户 2026-11-22 定的，docs/48）。
+#   Launcher 生成的 DNS 记录、客户端快照都写死了它。check 会核对它和 config.env、Corefile 一致。
+# - L1 的 Deployment 带了 control-plane 的容忍；L2 建集群时去掉了 control-plane 的污点（40-cluster.sh），不需要。
+apiVersion: v1
+kind: Service
+metadata:
+  name: mx-internal-coredns
+  labels:
+    app.kubernetes.io/name: mx-internal-coredns
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/component: dns-authority
+spec:
+  type: ClusterIP
+  externalIPs:
+    - 10.88.88.88
+  selector:
+    app.kubernetes.io/name: mx-internal-coredns
+  ports:
+    - { name: dns-udp, port: 53, targetPort: 53, protocol: UDP }
+    - { name: dns-tcp, port: 53, targetPort: 53, protocol: TCP }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mx-internal-coredns
+  labels:
+    app.kubernetes.io/name: mx-internal-coredns
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/component: dns-authority
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-internal-coredns
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-internal-coredns
+        app.kubernetes.io/part-of: mx-3ks
+        mx.qpjoy.com/component: dns-authority
+    spec:
+      dnsPolicy: ClusterFirst
+      containers:
+        - name: coredns
+          # 版本沿用 L1
+          image: coredns/coredns:1.11.3
+          imagePullPolicy: IfNotPresent
+          args: ["-conf", "/etc/coredns/Corefile"]
+          ports:
+            - { name: dns-udp, containerPort: 53, protocol: UDP }
+            - { name: dns-tcp, containerPort: 53, protocol: TCP }
+          livenessProbe:
+            tcpSocket: { port: 53 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          readinessProbe:
+            tcpSocket: { port: 53 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi, ephemeral-storage: 128Mi }
+          volumeMounts:
+            - name: coredns-config
+              mountPath: /etc/coredns
+              readOnly: true
+      volumes:
+        - name: coredns-config
+          configMap:
+            name: coredns
