@@ -133,6 +133,10 @@ export function loadConfig(): RuntimeConfig {
     // L2 (de-ladder2 docs/49): Launcher account/password logins may enter MinCave as an
     // employee (never admin). Off keeps the L1 rule: MinCave is Feishu only.
     mincavePasswordLoginEnabled: boolFromEnv('MX_MINCAVE_PASSWORD_LOGIN_ENABLED', false),
+    // L2 (de-ladder2 docs/52): when set, SSH profiles (the only way this server SSHes anywhere:
+    // Domestic peer sync, site-slot plans, readiness) may only target these hosts. s2's Launcher
+    // uses domestic02 as its test relay and must never reach the production Domestic before cutover.
+    siteSlotSshAllowedHosts: stringListFromEnv('MX_SITE_SLOT_SSH_ALLOWED_HOSTS'),
     feishuAppId: process.env.MX_FEISHU_APP_ID?.trim() || null,
     feishuAppSecret: process.env.MX_FEISHU_APP_SECRET?.trim() || null,
     feishuAllowedTenantKeys: stringListFromEnv('MX_FEISHU_ALLOWED_TENANT_KEYS'),

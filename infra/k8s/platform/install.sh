@@ -9,7 +9,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../versions.env"
 # 机器地址：环境变量 > 本地 .env > inventory（docs/50）
 # shellcheck source=../../../scripts/lib/site.sh
-SITE_ROOT="$(cd "$HERE/../../.." && pwd)" source "$HERE/../../../scripts/lib/site.sh"
+SITE_ROOT="$(cd "$HERE/../../.." && pwd)"   # 单独一行：前缀赋值只在 source 期间有效
+source "$SITE_ROOT/scripts/lib/site.sh"
 site_load_env
 site_check_env || exit 1
 

@@ -10,7 +10,9 @@ INV_HOSTS="$ROOT/inventory/hosts.yaml"
 source "$ROOT/infra/k8s/versions.env"
 # 机器地址可以用环境变量或本地 .env 改，和 manage.sh 同一套（docs/50）
 # shellcheck source=../lib/site.sh
-SITE_ROOT="$ROOT" source "$ROOT/scripts/lib/site.sh"
+# 单独一行赋值：写成 SITE_ROOT=... source 的话，变量只在 source 执行期间有效（set -u 下后面会报 unbound）
+SITE_ROOT="$ROOT"
+source "$ROOT/scripts/lib/site.sh"
 site_load_env
 site_check_env || exit 1
 

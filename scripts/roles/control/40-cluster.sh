@@ -6,7 +6,12 @@ need_root
 guard_target
 
 command -v kubeadm >/dev/null || die "没有 kubeadm。先做阶段 runtime。"
-mountpoint -q /mnt/nas || die "/mnt/nas 没有挂载。先做阶段 nas（kubelet 依赖它）。"
+# NAS 暂缓时（用户 2026-11-22，docs/51）可以先建集群：只有阶段 nas 做过（kubelet 已经配成等 NAS）才要求 NAS 挂着
+if [[ -f /etc/systemd/system/kubelet.service.d/10-requires-nas.conf ]]; then
+  mountpoint -q /mnt/nas || die "/mnt/nas 没有挂载，而阶段 nas 已经让 kubelet 等 NAS。先把 NAS 挂上。"
+else
+  note "NAS 暂缓（docs/51）：kubelet 不等 NAS。以后做阶段 nas 会补上这个依赖，再做阶段 backup"
+fi
 [[ "$(swapon --show --noheadings | wc -l)" -eq 0 ]] || die "swap 没关。先做阶段 host。"
 
 ADMIN=/etc/kubernetes/admin.conf

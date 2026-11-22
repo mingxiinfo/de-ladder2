@@ -276,6 +276,30 @@
       "date": "2026-11-22",
       "docs": "50",
       "decisions": "s2 的地址是 192.168.0.117（原来登记的 192.168.1.4 不对），会变：执行前用 LADDER2_S2_LAN_IP（命令前或本地 .env）改；地址只写在 inventory，网关 trustedAddresses 和链路探测用占位现换，Launcher 只信 Pod 网段；集群建好以后地址不能再变"
+    },
+    {
+      "round": "第二十三轮",
+      "date": "2026-11-22",
+      "docs": "51",
+      "decisions": "NAS 先不挂，先把 Launcher 的内部联网在 s2 上跑起来：nas、backup 两个阶段往后放，cluster 阶段只在 nas 做过时才要求 NAS；暂缓期间 etcd 和 pg-launcher 没有备份，切换用户流量前必须补"
+    },
+    {
+      "round": "第二十四轮",
+      "date": "2026-11-22",
+      "docs": "52",
+      "decisions": "s2 那套的测试中继用 domestic02，照 v1 让 v2 客户端连上后能 ssh root@10.88.88.88 到 internal02；客户端只认 HTTPS，要绑新域名；bootstrap 先走边缘隧道；Launcher 往外 SSH 加白名单，默认哪都连不了；装中继要不要对 domestic02 开 site-slot 远程执行待用户定"
+    },
+    {
+      "round": "第二十五轮",
+      "date": "2026-11-22",
+      "docs": "53",
+      "decisions": "s2 那套的 site-slot 远程执行常开，写在 config.env 里不用每次手动开；能到哪台只由 SSH 白名单决定，只写 domestic02，碰不到生产的 Domestic 和 Oversea；用密码装公钥、导出 WireGuard 私钥、edge-sync 仍然关"
+    },
+    {
+      "round": "第二十六轮",
+      "date": "2026-11-22",
+      "docs": "54",
+      "decisions": "domestic02 的公网地址 47.97.46.168 只登记在 inventory，会变：执行前用 LADDER2_DOMESTIC02_PUBLIC_IP 改；Launcher 的 SSH 白名单写占位、部署时现换，任何时候不许出现生产 Domestic 的地址；测试客户端的 .env 用 client-env 生成"
     }
   ]
 }

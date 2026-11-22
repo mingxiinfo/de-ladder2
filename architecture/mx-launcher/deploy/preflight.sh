@@ -3,6 +3,14 @@
 # 只放"每次都可能变"的前提。装过一次就不会变的事（建集群、装 CloudNativePG、host-nginx）在 node prepare 的阶段里，
 # 不在这里重复检查到底装得对不对，只看在不在。
 source "$LADDER2_ROOT/scripts/lib/hook.sh"
+SITE_ROOT="$LADDER2_ROOT"
+source "$LADDER2_ROOT/scripts/lib/site.sh"
+
+# Launcher 往外 SSH 的白名单（docs/52、docs/54）：按这次的地址换好占位，不许有生产 Domestic 的地址
+raw="$(awk -F= '$1=="MX_SITE_SLOT_SSH_ALLOWED_HOSTS"{print substr($0, length($1)+2)}' "$LADDER2_PROJECT_DIR/deploy/k8s/base/config.env")"
+if [[ -z "$raw" ]]; then bad "config.env 没有 MX_SITE_SLOT_SSH_ALLOWED_HOSTS：Launcher 能 SSH 到任何机器（docs/52）"
+elif allow="$(site_ssh_allowlist "$LADDER2_ROOT/inventory/hosts.yaml" "$raw" 2>&1)"; then ok "Launcher 往外 SSH 只能到：$(echo $allow)（地址来自 $(site_field_source domestic02 public_ip)）"
+else bad "SSH 白名单不对：$(tail -1 <<<"$allow")"; fi
 
 if k get crd clusters.postgresql.cnpg.io >/dev/null 2>&1; then ok "CloudNativePG 已装"
 else bad "没有 CloudNativePG：./scripts/manage.sh k8s platform postgres --context $LADDER2_CONTEXT"; fi

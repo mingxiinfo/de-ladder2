@@ -5689,6 +5689,39 @@ export function buildSiteSlotPlan(
   };
 }
 
+// L2 (de-ladder2 docs/52): MX_SITE_SLOT_SSH_ALLOWED_HOSTS limits every SSH profile, and so every
+// SSH this server runs, to the listed hosts. A per-profile ssh_config could alias a listed name to
+// another host, so it is refused while the allowlist is on. Empty list: L1 behaviour, no limit.
+export function assertSiteSlotSshHostAllowed(
+  config: Pick<RuntimeConfig, 'siteSlotSshAllowedHosts'>,
+  host: string | null,
+  sshConfigFile: string | null
+): void {
+  const allowed = (config.siteSlotSshAllowedHosts ?? []).map((value) => value.trim().toLowerCase()).filter(Boolean);
+  if (!allowed.length) return;
+  if (sshConfigFile) {
+    throw new Error('SSH profile sshConfigFile is not allowed while MX_SITE_SLOT_SSH_ALLOWED_HOSTS is set');
+  }
+  if (host && !allowed.includes(host.toLowerCase())) {
+    throw new Error(`SSH profile host ${host} is not in MX_SITE_SLOT_SSH_ALLOWED_HOSTS (${allowed.join(', ')})`);
+  }
+}
+
+// Read side of the same rule: a stored profile for a host outside the list (for example from a
+// copied database) is treated as absent, so nothing can SSH with it.
+export function siteSlotSshProfileAllowed(
+  config: Pick<RuntimeConfig, 'siteSlotSshAllowedHosts'>,
+  profile: Pick<SiteSlotSshProfile, 'host' | 'sshConfigFile'> | null
+): boolean {
+  if (!profile) return false;
+  try {
+    assertSiteSlotSshHostAllowed(config, profile.host ?? null, profile.sshConfigFile ?? null);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function buildSiteSlotSshProfile(
   config: RuntimeConfig,
   input: SiteSlotSshProfileInput,
@@ -5739,6 +5772,7 @@ export function buildSiteSlotSshProfile(
   if (!identityFile) warnings.push('missing: identityFile is required before artifact-push-remote-ssh can execute');
   if (!knownHostsFile) warnings.push('missing: knownHostsFile is required before artifact-push-remote-ssh can verify host keys');
   if (!hostKeyAlias) warnings.push('recommended: hostKeyAlias pins the expected known_hosts entry for this slot');
+  assertSiteSlotSshHostAllowed(config, input.host?.trim() || previous?.host || null, sshConfigFile);
   return {
     profileId,
     siteId,

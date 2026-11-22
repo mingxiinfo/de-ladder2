@@ -56,6 +56,10 @@
 | 48 | [Launcher 的角色地址](48.launcher-role-addresses.md) | `10.88.88.88`（Internal）和 `10.88.0.1`（Domestic）跟着角色走：s2 那套也用 `.88`，切换时换生产 Domestic 上这个对端的公钥；边缘隧道把 `.88` 保留，s1 的边缘地址是 `.87`，s2 仍是 `.89` |
 | 49 | [MinCave 的隐藏账号密码登录](49.mincave-hidden-password-login.md) | 登录页连点 5 下 logo 出现账号密码登录；客户端 `MX_H2I_MINCAVE_PASSWORD_LOGIN`、服务端 `MX_MINCAVE_PASSWORD_LOGIN_ENABLED` 两个开关，默认关；账号密码登录只是员工；客户端源码迁进 `architecture/mx-launcher/demos/mx-h2i/`，还打不了安装包 |
 | 50 | [s2 的地址从环境变量取](50.s2-address-from-env.md) | s2 现在是 `192.168.0.117`，会变：`LADDER2_S2_LAN_IP`（命令前或本地 `.env`）> inventory；地址只写在 inventory，网关和探测用占位现换，Launcher 只信 Pod 网段；集群建好以后地址不能再变 |
+| 51 | [NAS 先不挂，先跑内部联网](51.nas-deferred-internal-vpn-first.md) | nas、backup 两个阶段往后放；cluster 阶段只在 nas 做过时才要求 NAS；跑起 Launcher 要做的阶段；暂缓期间 etcd 和 `pg-launcher` 没有备份，切换前必须补 |
+| 52 | [v2 客户端经 domestic02 连进 s2](52.domestic02-test-relay-and-ssh.md) | 照 v1：WireGuard 到 domestic02 的 `mx-domestic`，再到 s2 的 `10.88.88.88`，连上后 `ssh root@10.88.88.88`；客户端只认 HTTPS，要新域名；bootstrap 先走边缘隧道；Launcher 往外 SSH 加白名单，默认哪都连不了；装中继要用户定是否对 domestic02 开远程执行 |
+| 53 | [site-slot 远程执行常开，只能到 domestic02](53.site-slot-remote-execution-on-for-domestic02.md) | 四个远程执行开关写在 `config.env` 里常开，不用每次手动开；能到哪台只由 SSH 白名单决定，s2 那套只写 domestic02；用密码装公钥、导出 WireGuard 私钥、`edge-sync` 仍然关；改了 `CLAUDE.md` 的硬约束 |
+| 54 | [domestic02 的公网地址只登记一处](54.domestic02-address-maintainable.md) | `47.97.46.168`，会变：`LADDER2_DOMESTIC02_PUBLIC_IP`（命令前或本地 `.env`）> inventory；Launcher 的 SSH 白名单写占位、部署时现换；任何时候不许出现生产 Domestic 的地址；测试客户端的 `.env` 用 `client-env` 生成 |
 
 **接着做：先读 29，再读 30、33、34。要在 s2 上动手，读 35。Launcher 和 L1 自己的服务怎么上 s2，读 36；动手做 Launcher v2 和 MX-H2I v2 之前，读 45；项目放哪、Launcher 怎么部署到 s2，读 46、47、48。加 Domestic、往边缘推送部署，读 37，再读 38、39、40、41、42、43、44。** 31、32 讲的是查看文档用的站点，不是架构。33、34 是海外的 toC 站点，大部分和 s2 无关，可以并行；NAS 读写那一段要等 s2。 第一次读：01 → 16 → 21 → 27 → 03 → 17 → 11。要动手：14 → 19 → 22 → 12。
 

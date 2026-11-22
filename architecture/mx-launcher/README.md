@@ -20,7 +20,7 @@ Launcher 管人和网络：身份和 SSO、MX-H2I、产品网络、订阅、Over
 | `site-slots/` | L1 | site-slot 的源文件。构建时生成产物（host-runner 要用）；Launcher 也靠它和 `scripts/manage.sh` 认自己的根目录 |
 | `demos/mx-h2i/` | L1 | MX-H2I / MinCave 客户端。L2 加了隐藏的账号密码登录（`docs/49`）。界面能构建能测（`scripts/manage.sh client-test`），还打不了安装包 |
 | `Dockerfile` | L2 | 一次构建出 site-slot 产物、管理界面、服务端 |
-| `scripts/manage.sh` | L2 | 项目入口：`test`、`typecheck`、`build`、`render`、`bootstrap-render`、`status`、`client-test` |
+| `scripts/manage.sh` | L2 | 项目入口：`test`、`typecheck`、`build`、`render`、`bootstrap-render`、`status`、`client-test`、`client-env` |
 | `deploy/k8s/` | L2 | `platform/`（命名空间 `mx-internal-shadow`、`mx-dns`）、`base/`、`dns/`、`bootstrap/`（归 Launcher 改的两个 ConfigMap）、`overlays/ladder2/` |
 | `deploy/preflight.sh`、`verify.sh`、`once/` | L2 | `app deploy` 每次跑的检查和验证、只跑一次的步骤（`docs/47` 第 5 条） |
 | `deploy/secrets.list` | L2 | 要哪些 Secret |

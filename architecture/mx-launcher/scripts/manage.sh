@@ -21,6 +21,7 @@ mx-launcher（architecture/mx-launcher）
   status              看集群里的状态 = ./scripts/manage.sh app status mx-launcher（要 --context）
   client-test         MinCave 客户端（demos/mx-h2i）：构建界面、跑界面测试和 L2 加的测试（要先 npm --prefix demos/mx-h2i/ui ci）
   client-package      还没实现：打安装包要 L1 的 workspace 包和 WireGuard 引擎，还没迁进来（docs/49）
+  client-env --domain <新域名>   打印测试客户端的 .env：domestic02 的地址按这次的取（inventory 或 LADDER2_DOMESTIC02_PUBLIC_IP，docs/54）
 
 部署、导入镜像、建 Secret 都用本工程的 ./scripts/manage.sh，必须带 --context（docs/46）。
 EOF
@@ -40,6 +41,22 @@ case "$cmd" in
     cd "$HERE/demos/mx-h2i"
     node scripts/build-ui.mjs
     exec node --test ui/tests/*.test.mjs scripts/mincave-password-login.test.mjs scripts/ui-entry-policy.test.mjs scripts/network-diagnostic-policy.test.mjs ;;
+  client-env)
+    SITE_ROOT="$ROOT"; source "$ROOT/scripts/lib/site.sh"; site_load_env; site_check_env || exit 1
+    domain=""
+    while (( $# )); do case "$1" in --domain) domain="${2:-}"; shift 2 ;; --domain=*) domain="${1#*=}"; shift ;; *) echo "不认识的参数：$1" >&2; exit 1 ;; esac; done
+    [[ -n "$domain" ]] || { echo "用法：client-env --domain <新域名>（domestic02 上配了 HTTPS 的域名，docs/52）" >&2; exit 1; }
+    relay="$(site_host_field "$ROOT/inventory/hosts.yaml" domestic02 public_ip)"
+    site_ssh_allowlist "$ROOT/inventory/hosts.yaml" "$relay" >/dev/null || exit 1
+    cat <<ENV
+# 由 architecture/mx-launcher/scripts/manage.sh client-env 生成（docs/52、docs/54）。domestic02 的地址来自 $(site_field_source domestic02 public_ip)
+MX_H2I_BOOTSTRAP_BASE_URL=https://$domain
+MX_H2I_HOST_RESOLVE=$domain=$relay
+MX_H2I_DOMESTIC_RELAY_HOST=$relay
+MX_H2I_UI=mincave
+MX_H2I_MINCAVE_PASSWORD_LOGIN=1
+ENV
+    ;;
   client-package)
     echo "client-package 还没实现：打 MinCave 安装包要 L1 的 workspace 包（electron-launcher、tunnel 引擎、WireGuard 引擎），还没迁进来。见 docs/49。" >&2
     exit 2 ;;

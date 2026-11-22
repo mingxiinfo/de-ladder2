@@ -248,6 +248,7 @@ import {
   buildSiteSlotInternalServicePeerObservation,
   buildSiteSlotRunnerSession,
   buildSiteSlotSshProfile,
+  siteSlotSshProfileAllowed,
   buildSiteSlotRollbackExecution,
   buildSiteSlotRollbackReport,
   buildSiteSlotWorkerJob,
@@ -2741,11 +2742,14 @@ export class PostgresStore implements PlatformStore {
 
   async listSiteSlotSshProfiles(): Promise<SiteSlotSshProfile[]> {
     const profiles = await this.listRecords<SiteSlotSshProfile>('site-slot-ssh-profile');
-    return profiles.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return profiles
+      .filter((profile) => siteSlotSshProfileAllowed(this.config, profile))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async getSiteSlotSshProfile(profileId: string): Promise<SiteSlotSshProfile | null> {
-    return this.getRecord<SiteSlotSshProfile>('site-slot-ssh-profile', profileId);
+    const profile = await this.getRecord<SiteSlotSshProfile>('site-slot-ssh-profile', profileId);
+    return siteSlotSshProfileAllowed(this.config, profile) ? profile : null;
   }
 
   async getSiteSlotSshProfileForSite(siteId: string): Promise<SiteSlotSshProfile | null> {

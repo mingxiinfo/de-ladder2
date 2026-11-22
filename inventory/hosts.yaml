@@ -75,8 +75,20 @@ hosts:
     role: edge
     desc: 公网 443（Compose Nginx，按 SNI 分域名）+ WireGuard 中继
     wg_ip: 10.88.0.1
+    public_ip: 116.62.51.154         # 出自 L1 MX-H2I 客户端的默认中继地址（main-runtime.cjs 的 DEFAULT_DOMESTIC_RELAY_HOST），没登录核对
+    former_public_ips: 121.43.253.179,121.43.254.179   # 同一处的 STALE_DOMESTIC_RELAY_HOSTS。s2 那套的 SSH 白名单不许出现这些和上一行（docs/54）
     spec: 2 vCPU / 4 GiB / 峰值 100 Mbps / 流量 0.8 元每 GB
     source: mx-launcher/docs/53、de-mingxi/compass/deploy/README.md
+
+  domestic02:
+    name: domestic02
+    site: domestic
+    role: edge
+    desc: 第二台 Domestic。L2 的边缘隧道 qpjoy-relay（docs/44），也是 s2 那套 Launcher 的测试中继（docs/52）
+    public_ip: 47.97.46.168          # 用户 2026-11-22。会变：改这一行，或执行前用 LADDER2_DOMESTIC02_PUBLIC_IP 覆盖（命令前或本地 .env，docs/54）
+    wg_ip: 10.88.0.2                 # 边缘隧道地址（docs/44）。s2 那套的中继 mx-domestic 在这台上是 10.88.0.1（docs/48）
+    ports: TCP 443、80（bootstrap 的 HTTPS 和跳转），UDP 51280（中继），UDP 51820（边缘隧道）；阿里云安全组也要放行（docs/43、docs/52）
+    os: 待确认
 
   # 原来这里是占位 cloud（未租用）。2026-11-17 第六轮换成已有的这台（docs/33）。
   oversea-toc:

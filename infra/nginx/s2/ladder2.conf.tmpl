@@ -120,9 +120,11 @@ server {
 # 其余请求的 X-Forwarded-For 改写成直连地址（客户端自己填的不算），并清掉 X-MX-Forwarded-By。
 # 网关按 trustedAddresses 认出客户端后放在 X-Forwarded-For 最右边；Launcher 按 MX_HTTP_TRUST_PROXY_CIDRS 只信网关 Pod，
 # 从右往左取客户端（server/src/lib/trust-proxy.ts，docs/50）。
+# 10.88.0.1 是 Domestic 的中继（mx-domestic）；10.88.0.N 是 Domestic 机器的边缘隧道地址（docs/44），
+# 例如 domestic02 的 10.88.0.2 经边缘隧道转来的 bootstrap（docs/52）。H2I 客户端在 10.89 起，不在这一段。
 map "$remote_addr|$http_x_mx_forwarded_by" $ladder2_launcher_edge {
-    default                    0;
-    "10.88.0.1|domestic-edge"  1;
+    default                                  0;
+    "~^10\.88\.0\.[0-9]+\|domestic-edge$"   1;
 }
 map $ladder2_launcher_edge $ladder2_launcher_edge_by  { 1 "domestic-edge";       default ""; }
 map $ladder2_launcher_edge $ladder2_launcher_edge_xff { 1 $http_x_forwarded_for; default ""; }

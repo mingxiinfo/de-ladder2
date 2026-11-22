@@ -60,6 +60,37 @@ app_workloads() { # app_workloads <overlay 目录> → 每行：kind/name namesp
     END { if (k != "" && n != "") print k "/" n, ns }'
 }
 
+# 机器地址的占位（docs/54）：项目 deploy/k8s 下 *.env 里的 @<主机>_LAN_IP@、@<主机>_PUBLIC_IP@，
+# 渲染和部署前换成这次的地址（环境变量 > 本地 .env > inventory，scripts/lib/site.sh）。
+# 换在临时拷贝里，不改本工程的文件；ConfigMap 的名字带内容的哈希，地址变了 Pod 会跟着滚动。
+APP_RUN_TMP=""
+app_tmp_init() { # 在主 shell 里调用（不能在 $(...) 里），临时目录随进程退出删除
+  [[ -n "$APP_RUN_TMP" ]] && return 0
+  APP_RUN_TMP="$(mktemp -d)"
+  trap 'rm -rf "$APP_RUN_TMP"' EXIT
+}
+app_site_overlay() { # app_site_overlay <overlay 目录> → 换好地址的 overlay 目录；没有占位就原样返回
+  local ov="$1" k8s rel out f
+  k8s="$(cd "$ov/../.." && pwd)"
+  grep -rlE '@[A-Z0-9_]+_(LAN|PUBLIC)_IP@' "$k8s" --include='*.env' >/dev/null 2>&1 || { echo "$ov"; return 0; }
+  [[ -n "$APP_RUN_TMP" ]] || die "内部错误：app_site_overlay 之前要先 app_tmp_init"
+  out="$APP_RUN_TMP/$(basename "$(cd "$k8s/../.." && pwd)")-k8s"
+  if [[ ! -d "$out" ]]; then
+    cp -R "$k8s" "$out"
+    while IFS= read -r f; do
+      site_expand "$INV_HOSTS" "$(cat "$f")" >"$f.new" || die "$f 里的地址占位换不掉（见上一行）"
+      printf '\n' >>"$f.new"; mv "$f.new" "$f"
+    done < <(grep -rlE '@[A-Z0-9_]+_(LAN|PUBLIC)_IP@' "$out" --include='*.env')
+    # 任何 SSH 白名单（*_SSH_ALLOWED_HOSTS）换完地址后都不许有生产 Domestic 的地址，app apply / diff / render 都挡（docs/54）
+    local line
+    while IFS= read -r line; do
+      site_ssh_allowlist "$INV_HOSTS" "${line#*=}" >/dev/null || die "拒绝：${line%%=*} 换完地址是 ${line#*=}（docs/54）"
+    done < <(grep -rhE '^[A-Z0-9_]*SSH_ALLOWED_HOSTS=' "$out" --include='*.env')
+  fi
+  rel="$(cd "$ov" && pwd)"; rel="${rel#"$k8s"/}"
+  echo "$out/$rel"
+}
+
 # app_apply_all <项目目录> <overlay> <ctx>：platform/ → bootstrap/ 里集群还没有的 → overlay
 app_apply_all() {
   local dir="$1" ov="$2" ctx="$3" f
@@ -78,9 +109,10 @@ app_apply_all() {
       fi
     done
   fi
+  local sov; sov="$(app_site_overlay "$ov")" || exit 1
   echo "▶ 与集群 ${B}$ctx${O} 的差异："
-  kubectl --context "$ctx" diff -k "$ov" || true
-  kubectl --context "$ctx" apply -k "$ov"
+  kubectl --context "$ctx" diff -k "$sov" || true
+  kubectl --context "$ctx" apply -k "$sov"
 }
 
 app_image_ref() { # app_image_ref <overlay 目录> → newName:newTag（images: 的第一条）
@@ -130,6 +162,7 @@ app_warn_missing_secrets() { # 部署后提醒还缺的必需 Secret（不拦）
 
 cmd_app() {
   local sub="${1:-list}"; shift || true
+  app_tmp_init
   local pos=() a
   while IFS= read -r a; do pos+=("$a"); done < <(app_positional "$@")
   case "$sub" in
@@ -143,10 +176,12 @@ cmd_app() {
       done
       (( n )) || echo "（还没有。见 docs/46）" >&2 ;;
     render)
-      kubectl kustomize "$(app_overlay "${pos[0]:-}" "${pos[1]:-}")" ;;
+      local sov; sov="$(app_site_overlay "$(app_overlay "${pos[0]:-}" "${pos[1]:-}")")" || exit 1
+      kubectl kustomize "$sov" ;;
     diff)
-      local ov ctx; ov="$(app_overlay "${pos[0]:-}" "${pos[1]:-}")"; ctx="$(need_context "$@")"
-      kubectl --context "$ctx" diff -k "$ov" || true ;;
+      local ov ctx sov; ov="$(app_overlay "${pos[0]:-}" "${pos[1]:-}")"; ctx="$(need_context "$@")"
+      sov="$(app_site_overlay "$ov")" || exit 1
+      kubectl --context "$ctx" diff -k "$sov" || true ;;
     apply)
       local dir ov ctx ns
       dir="$(app_dir "${pos[0]:-}")"; ov="$(app_overlay "${pos[0]:-}" "${pos[1]:-}")"; ctx="$(need_context "$@")"
@@ -584,13 +619,32 @@ check_launcher_consistency() { # architecture/mx-launcher 里要一致的几处�
   # API 不经过应用网关（docs/47）
   if awk '/name: mx-launcher-api/{f=1} f&&/backendRefs/{getline; print; exit}' "$d/deploy/k8s/base/route.yaml" | grep -q 'name: mx-launcher-internal'; then ok "HTTPRoute mx-launcher-api 直接到 Launcher，不经过应用网关"
   else bad "route.yaml 的 mx-launcher-api 后端不是 mx-launcher-internal"; fi
-  for k in SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED SITE_SLOT_WORKER_REMOTE_SSH SITE_SLOT_CONFIRM_REMOTE_EXECUTION SITE_SLOT_DOMESTIC_WG_SECRET_EXPORT_ENABLED; do
+  # site-slot 远程执行可以开（用户 2026-11-22，docs/53），前提是下面的 SSH 白名单有值；密钥导出和 edge-sync 仍然必须关
+  for k in SITE_SLOT_DOMESTIC_WG_SECRET_EXPORT_ENABLED SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED; do
     v="$(cfgv "$k")"
-    [[ "$v" == 0 ]] || { bad "$k=${v:-（没写）}：切换前必须是 0（docs/36）"; off=0; }
+    [[ "$v" == 0 ]] || { bad "$k=${v:-（没写）}：必须是 0（docs/36、docs/53）"; off=0; }
   done
   if cfgv MX_ENABLED_MODULES | tr ',' ' ' | grep -qw edge-sync; then bad "MX_ENABLED_MODULES 里有 edge-sync：切换前必须去掉（docs/36）"; off=0; fi
   if grep -qE 'name: SITE_SLOT_' "$d/deploy/k8s/base/api.yaml"; then bad "api.yaml 用 env 设了 SITE_SLOT_*，会盖掉 config.env 的 0（L1 的写法）"; off=0; fi
-  (( off )) && ok "切换前必须关的开关都关着：site-slot 远程执行、WG 密钥导出、edge-sync（docs/36）"
+  (( off )) && ok "必须关的开关都关着：WG 密钥导出、用密码装 SSH 公钥、edge-sync（docs/36、docs/53）"
+  local remote=0
+  for k in SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED SITE_SLOT_WORKER_REMOTE_SSH SITE_SLOT_CONFIRM_REMOTE_EXECUTION; do
+    [[ "$(cfgv "$k")" == 1 ]] && remote=1
+  done
+  if (( remote )) && [[ -z "$(cfgv MX_SITE_SLOT_SSH_ALLOWED_HOSTS)" ]]; then
+    bad "site-slot 远程执行开着，但没有 MX_SITE_SLOT_SSH_ALLOWED_HOSTS：能推到任何机器，包括生产的 Domestic（docs/53）"
+  elif (( remote )); then ok "site-slot 远程执行开着，只能到白名单里的机器（docs/53）"
+  fi
+  # Launcher 往外 SSH 的白名单必须有（docs/52）：空着就是 L1 的行为，哪都能连。
+  # 写占位、从 inventory 现取（docs/54），不许出现生产 Domestic 的地址
+  v="$(cfgv MX_SITE_SLOT_SSH_ALLOWED_HOSTS)"
+  local allow
+  if [[ -z "$v" ]]; then bad "config.env 没有 MX_SITE_SLOT_SSH_ALLOWED_HOSTS：s2 的 Launcher 能 SSH 到任何机器，包括生产的 Domestic（docs/52）"
+  elif ! allow="$(site_ssh_allowlist "$INV_HOSTS" "$v" 2>&1)"; then bad "MX_SITE_SLOT_SSH_ALLOWED_HOSTS（$v）：$(tail -1 <<<"$allow")"
+  else
+    ok "Launcher 往外 SSH 只能到：$(echo $allow)（config.env 写 $v，地址来自 $(site_field_source domestic02 public_ip)，docs/54）"
+    [[ "$v" == *@*@* ]] || warn "MX_SITE_SLOT_SSH_ALLOWED_HOSTS 写死了地址 $v：改成 @DOMESTIC02_PUBLIC_IP@，换地址时只改 inventory（docs/54）"
+  fi
   # app apply 先 platform/、再 bootstrap/、最后 overlay：overlay 用到的命名空间要在 platform/ 里建好，否则第一次部署在 bootstrap 那步就停
   local want have miss=""
   # 只看 metadata.namespace（两格缩进），不算 parentRefs 里引用的 gateway 这类别人的命名空间

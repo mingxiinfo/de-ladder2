@@ -37,6 +37,8 @@ export interface RuntimeConfig {
   mincaveInitialAdminUserId?: string | null;
   /** L2: admit Launcher account/password tokens to MinCave as employees. */
   mincavePasswordLoginEnabled?: boolean;
+  /** L2: SSH profiles may only target these hosts when non-empty. */
+  siteSlotSshAllowedHosts?: string[];
   feishuAppId: string | null;
   feishuAppSecret: string | null;
   feishuAllowedTenantKeys: string[];

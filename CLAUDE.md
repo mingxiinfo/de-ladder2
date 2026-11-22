@@ -11,7 +11,7 @@ de-llaaddddeerr 的第二层：集群架构、自身业务、整套架构的知�
 
 ## 硬约束
 
-- **任何改动不得影响 MX-H2I 现有用户登录和现有联网。** Launcher 栈先在 s2 上复刻（独立的库、自己的 service peer 密钥，切换前不连生产的 Domestic，不开 site-slot 远程执行），把用户流量从 s1 切过去排最后（`docs/36`）。不改 s1 上任何监听端口、地址、iptables 规则，除非用户明确要求。
+- **任何改动不得影响 MX-H2I 现有用户登录和现有联网。** Launcher 栈先在 s2 上复刻（独立的库、自己的 service peer 密钥，切换前不连生产的 Domestic；site-slot 远程执行常开，但只能到 `MX_SITE_SLOT_SSH_ALLOWED_HOSTS` 里的 domestic02，用户 2026-11-22，`docs/53`），把用户流量从 s1 切过去排最后（`docs/36`）。不改 s1 上任何监听端口、地址、iptables 规则，除非用户明确要求。
 - mx-pay 保持独立：专用数据库、独立发布。
 - 不删旧数据。迁移只复制；任何脚本都不提供自动删除旧数据的命令。
 - **项目一个个迁进本工程**（用户 2026-11-22，`docs/46`）：和 k8s 高度集成的平台（Launcher：部署、网关、DNS、鉴权）放 `architecture/<名字>/`，迁过来的业务项目连源码放 `projects/<名字>/`，没有自己源码的服务放 `services/`。迁哪个才拷哪个，用 `git archive` 从 L1 拷提交过的文件，拷之前扫私钥和令牌，每个项目写 `SOURCE.md`（来源提交、路径、L2 改了什么）。L2 对源码的改动用环境变量开关，不开时和 L1 一样。
@@ -96,11 +96,13 @@ Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节
 - 控制面坏了不等于服务停了：已经在跑的 Pod 和网关继续工作。也不会自动切换到另一台（`docs/26`）。
 - `infra/` 里网关和 CloudNativePG 的版本号抄自 cc-studio，没有重新核对，也没在集群上跑过。
 - arguseek 跑在海外云服务器 `oversea-toc` 上，不在 s1；Delta（po-infra）的正式和 dev 在 s1。海外要放 Delta 就整个实例放，不要 worker 在海外、库和 Redis 在内网。海外站点不跨境用 NFS 挂 NAS，读写走 rclone 本机缓存加内网发起的隧道，隧道的内网端放 s2、s1 不动，站点只写自己的目录；站点区域没定，按实测选（`docs/33`、`docs/34`）。
+- s2 的 nas、backup 两个阶段暂缓，先跑 Launcher 的内部联网；这期间 etcd 和 `pg-launcher` 没有备份，切换用户流量前必须补（用户 2026-11-22，`docs/51`）。
 - s2 按 `docs/35` 的 14 个阶段落地：`node prepare s2 <阶段>` 做、`node verify s2 [阶段]` 验，一次一个阶段。机器上的阶段（host、nas、runtime、cluster、backup、host-nginx）在 s2 本机 sudo 跑，`PROXY` 写在 sudo 后面；分卷和边缘是手工的。1000 QPS 逐层压，边缘不在验收里（和 H2I 共用）。host-nginx 转 NodePort 用本机 LAN 地址，不用 127.0.0.1；数据库用存储类 `local-retain`（删 PVC 不删数据）。
 - MX-H2I 3.0.0 起的新界面 MinCave（`ui/`，React）和旧界面（`src/renderer.js`）在同一个包里，共用主进程；旧界面的功能（H2O 管理、AppCenter 调试、账号密码和匿名入口）没删，只是新界面没露出来。`package.json` 一直是 2.1.20，3.0.x 是 Release Center 上的安装包版本。客户端源码在 `architecture/mx-launcher/demos/mx-h2i/`（L1 `1d9555e8`，`docs/49`），它依赖的 L1 workspace 包没迁，还打不了安装包；测试版不发到生产的 Release Center（`docs/45`）。MinCave 登录页连点 5 下 logo 出现账号密码登录，要客户端 `MX_H2I_MINCAVE_PASSWORD_LOGIN=1` 和服务端 `MX_MINCAVE_PASSWORD_LOGIN_ENABLED=1` 都开，这样登录的只是员工，不是 MinCave 管理员（`docs/49`）。
 - s2 上的 Launcher API 在 host-nginx → Gateway internal 后面，不经过应用网关；客户端地址由网关按 `ngf-values.yaml` 的 `trustedAddresses` 认，Launcher 的 `MX_HTTP_TRUST_PROXY_CIDRS` 只信 Pod 网段（`docs/50`），"是不是 Domestic 中继转来的"由 host-nginx 的 18090 段判断。应用网关 `mx-internal-gateway` 是 nginx，读 Launcher 生成的 `nginx.conf`，不再是 Caddy（`docs/47`）。网关和 Corefile 的 ConfigMap 在 `bootstrap/`，归 Launcher 运行时改，`app apply` / `app deploy` 不覆盖；要重新生成用 `architecture/mx-launcher/scripts/manage.sh bootstrap-render`，不要手改。
 - `10.88.88.88`（Internal）和 `10.88.0.1`（Domestic）是 Launcher 的角色地址，跟着角色走，不是某台机器的地址（用户 2026-11-22 选 A，`docs/48`）。Launcher 代码里写死它们的 72 处不改。s2 那套在自己的环境里也用 `.88`；切换是把生产 Domestic 上 `10.88.88.88/32` 对端的公钥从 s1 换成 s2，回退换回来。切换前 s2 不和生产 Domestic 握手，**s2 绝不用 s1 库里 service peer 的私钥**（密钥一样会顶掉 s1）。
 - host-runner 的 DaemonSet 由 Launcher 在管理界面上建（Ensure K8s Fallback），清单只给权限，不要在清单里也建它；分流 DNS 用 Service 的 `externalIPs`，不用 hostPort / NodePort（`docs/47`）。
+- s2 那套的测试中继是 domestic02（`docs/52`）。Launcher 往外 SSH 只能到 `MX_SITE_SLOT_SSH_ALLOWED_HOSTS` 里的机器，s2 的值写占位 `@DOMESTIC02_PUBLIC_IP@`，部署时按 `LADDER2_DOMESTIC02_PUBLIC_IP` > 本地 `.env` > inventory 换（现在 `47.97.46.168`，会变，`docs/54`）；不写生产的 Domestic（脚本会拒绝），也不要清空（清空就是哪都能连）；site-slot 远程执行靠它常开（`docs/53`），用密码装公钥、导出 WireGuard 私钥、`edge-sync` 仍然关。v2 客户端只认 HTTPS，远程用要在 domestic02 上配新域名。
 - 部署用 `app deploy`：检查 → 一次性步骤 → apply → 等滚动 → 验证，每段计时。只跑一次的迁移、修复放项目的 `deploy/once/`，跑过记进集群里的 ConfigMap `ladder2-once`，以后跳过，跑过的用 `app once archive` 挪进 `once/archive/` 留档。每次都跑的检查只放快的（`preflight.sh`、`verify.sh`），慢的放 `verify-full.sh`。出事故后的修复不要加进部署（L1 的 deploy 就是这样变慢的，`docs/47` 第 5 条）。
 - 服务放哪台交给调度器：它按 requests 放，不看实际用量，所以 requests 要写准。人只定 GPU、service peer、数据库（本地卷绑节点）、要分散的副本。依据看 `k8s capacity`（`docs/47` 第 1 条）。
 - 用户问的"双 master k8s"答过了：控制面仍只有 s2，s1 等用户切走后重装、作为 node 加入，第三台内网服务器到了再升三台 control（`docs/45`、`docs/16`）。组件沿用 s1 的，不换。

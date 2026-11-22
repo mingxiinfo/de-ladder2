@@ -66,6 +66,7 @@ import {
   buildSiteSlotInternalServicePeerObservation,
   buildSiteSlotRunnerSession,
   buildSiteSlotSshProfile,
+  siteSlotSshProfileAllowed,
   buildSiteSlotRollbackExecution,
   buildSiteSlotRollbackReport,
   buildSiteSlotWorkerJob,
@@ -2228,11 +2229,14 @@ export class MemoryStore implements PlatformStore {
   }
 
   listSiteSlotSshProfiles(): SiteSlotSshProfile[] {
-    return [...this.siteSlotSshProfiles.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return [...this.siteSlotSshProfiles.values()]
+      .filter((profile) => siteSlotSshProfileAllowed(this.config, profile))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   getSiteSlotSshProfile(profileId: string): SiteSlotSshProfile | null {
-    return this.siteSlotSshProfiles.get(profileId) ?? null;
+    const profile = this.siteSlotSshProfiles.get(profileId) ?? null;
+    return siteSlotSshProfileAllowed(this.config, profile) ? profile : null;
   }
 
   getSiteSlotSshProfileForSite(siteId: string): SiteSlotSshProfile | null {

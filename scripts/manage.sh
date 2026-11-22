@@ -203,12 +203,16 @@ cmd_check() {
   if grep -q 'value: "@S2_LAN_IP@/32"' "$K8S/platform/gateway/ngf-values.yaml" && grep -q "value: $cni0/32" "$K8S/platform/gateway/ngf-values.yaml"; then
     ok "网关信任的来源地址是 cni0 的 $cni0 和 s2（安装时换成 $s2ip，来自 $(site_lan_source s2)，docs/35、docs/50）"
   else bad "ngf-values.yaml 的 trustedAddresses 要有 cni0 的 $cni0/32 和占位 \"@S2_LAN_IP@/32\"（docs/50）"; fi
-  # s2 的地址会变（docs/50）：除了 inventory/hosts.yaml 的默认值，清单和配置里只写占位，不写死地址
-  local inv_s2 hard
-  inv_s2="$(awk '/^  s2:/{h=1;next} /^  [a-z0-9_-]+:[ ]*$/{h=0} h && $1=="lan_ip:"{print $2; exit}' "$INV_HOSTS")"
-  hard="$(grep -rlF "$inv_s2" infra architecture/*/deploy inventory/probes.yaml scripts 2>/dev/null | grep -v node_modules || true)"
-  if [[ -z "$hard" ]]; then ok "s2 的地址只在 inventory/hosts.yaml 写了默认值，别处用占位或现取（docs/50）"
-  else bad "这些文件写死了 s2 的地址 $inv_s2，改成 @S2_LAN_IP@ 或用 host_field 现取：$(echo $hard)"; fi
+  # 会变的地址（docs/50、docs/54）：除了 inventory/hosts.yaml，清单和配置里只写占位，不写死地址
+  local pair hh ff addr hard
+  for pair in s2:lan_ip domestic02:public_ip; do
+    hh="${pair%%:*}"; ff="${pair#*:}"
+    addr="$(awk -v h="$hh" -v f="$ff" '$0 ~ "^  "h":[ ]*$"{x=1;next} /^  [a-z0-9_-]+:[ ]*$/{x=0} x && $1==f":"{print $2; exit}' "$INV_HOSTS")"
+    [[ -n "$addr" ]] || continue
+    hard="$(grep -rlF "$addr" infra architecture/*/deploy inventory/probes.yaml scripts 2>/dev/null | grep -v node_modules || true)"
+    if [[ -z "$hard" ]]; then ok "$hh 的地址只在 inventory/hosts.yaml 写了，别处用占位或现取（docs/50、docs/54）"
+    else bad "这些文件写死了 $hh 的地址 $addr，改成 @$(site_env_name "$hh" "$ff" | sed 's/^LADDER2_//')@ 或用 host_field 现取：$(echo $hard)"; fi
+  done
   check_launcher_consistency "$s2ip"
 
   echo
