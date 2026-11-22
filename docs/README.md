@@ -61,6 +61,7 @@
 | 53 | [site-slot 远程执行常开，只能到 domestic02](53.site-slot-remote-execution-on-for-domestic02.md) | 四个远程执行开关写在 `config.env` 里常开，不用每次手动开；能到哪台只由 SSH 白名单决定，s2 那套只写 domestic02；用密码装公钥、导出 WireGuard 私钥、`edge-sync` 仍然关；改了 `CLAUDE.md` 的硬约束 |
 | 54 | [domestic02 的公网地址只登记一处](54.domestic02-address-maintainable.md) | `47.97.46.168`，会变：`LADDER2_DOMESTIC02_PUBLIC_IP`（命令前或本地 `.env`）> inventory；Launcher 的 SSH 白名单写占位、部署时现换；任何时候不许出现生产 Domestic 的地址；测试客户端的 `.env` 用 `client-env` 生成 |
 | 55 | [两条命令：init 和 deploy](55.init-and-deploy.md) | `init <主机>` 第一次按顺序做完 8 个准备阶段（含 buildkit），失败修好再跑；`deploy <项目>` 每次上线：凭据（第一次生成）→ 镜像（按提交定版本，本机 buildkit 构建）→ 检查 → 一次性步骤 → apply → 等滚动 → 验证；host-nginx 的 404 是 reload 后检查太快 |
+| 56 | [基础镜像只拉一次，依赖不每次重装](56.base-images-once-and-build-cache.md) | deploy 先经 containerd 把 Dockerfile 的基础镜像拉到本机（只拉一次，`--pull` 重拉），buildkit 用 `image-resolve-mode=local` 构建，不再连 Docker Hub；层缓存留在 s2，只改业务代码时只重做 build 那几步 |
 
 **接着做：先读 29，再读 30、33、34。要在 s2 上动手，读 35。Launcher 和 L1 自己的服务怎么上 s2，读 36；动手做 Launcher v2 和 MX-H2I v2 之前，读 45；项目放哪、Launcher 怎么部署到 s2，读 46、47、48。加 Domestic、往边缘推送部署，读 37，再读 38、39、40、41、42、43、44。** 31、32 讲的是查看文档用的站点，不是架构。33、34 是海外的 toC 站点，大部分和 s2 无关，可以并行；NAS 读写那一段要等 s2。 第一次读：01 → 16 → 21 → 27 → 03 → 17 → 11。要动手：14 → 19 → 22 → 12。
 

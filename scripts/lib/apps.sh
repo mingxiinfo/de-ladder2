@@ -415,12 +415,14 @@ app_dirty_hash() { # app_dirty_hash <目录> → 8 位：已跟踪文件的改�
 #   0a 凭据（第一次自动生成随机令牌）→ 0b 镜像（版本按 git 提交算，本机没有就用 buildkit 构建）→ app deploy 的六段：
 #   检查 → 一次性步骤（迁移、修复）→ apply → 等滚动 → 一次性步骤 → 验证。数据库表结构的迁移在 Pod 的 initContainer 里，每次都跑、可重入
 app_ship() {
-  local args=("$@") pos=() a
-  while IFS= read -r a; do [[ "$a" == --full ]] && continue; pos+=("$a"); done < <(app_positional "$@")
+  local args=() pos=() a pull=""
+  # --pull：这次重新拉基础镜像（平时只在本机没有时拉一次，docs/56）。不传给后面的 app deploy
+  for a in "$@"; do if [[ "$a" == --pull ]]; then pull=--pull; else args+=("$a"); fi; done
+  while IFS= read -r a; do [[ "$a" == --full ]] && continue; pos+=("$a"); done < <(app_positional "${args[@]}")
   local proj="${pos[0]:-}"
   [[ -n "$proj" ]] || die "用法：deploy <项目> [环境] [--full] --context <名字>（docs/55）"
   local dir ov ctx ns t0=$SECONDS
-  dir="$(app_dir "$proj")"; ov="$(app_overlay "$proj" "${pos[1]:-}")"; ctx="$(need_context "$@")"; ns="$(app_namespace "$ov")"
+  dir="$(app_dir "$proj")"; ov="$(app_overlay "$proj" "${pos[1]:-}")"; ctx="$(need_context "${args[@]}")"; ns="$(app_namespace "$ov")"
   echo "${B}上线 $proj${O} → 集群 $ctx"
   echo "${B}0a. 凭据${O}"
   app_secrets_ensure "$proj" "$dir" "$ctx" "$ns"
@@ -436,10 +438,10 @@ app_ship() {
     fi
     export APP_IMAGE_TAG="$tag"
     ref="$(app_image_ref "$ov")"
-    if [[ $EUID -eq 0 ]] && command -v ctr >/dev/null && ctr -n k8s.io images ls -q 2>/dev/null | grep -qxF "$ref"; then
+    if [[ -z "$pull" && $EUID -eq 0 ]] && command -v ctr >/dev/null && ctr -n k8s.io images ls -q 2>/dev/null | grep -qxF "$ref"; then
       ok "本机 containerd 里已有 $ref，不重新构建"
     elif [[ -S /run/buildkit/buildkitd.sock ]] && command -v buildctl >/dev/null; then
-      image_build_buildkit "$dir" "$ref"
+      image_build_buildkit "$dir" "$ref" ${pull:+"$pull"}
     elif command -v docker >/dev/null; then
       cmd_image build "$proj"; cmd_image import "$proj" --context "$ctx"
     else
@@ -511,12 +513,42 @@ app_once() { # app once list|run|mark|archive <项目> [步骤] --context <名�
 
 # ---------- image ----------
 
+# Dockerfile 里 FROM 的外部镜像（docs/56）：按 ARG 的默认值展开，去掉前面阶段的名字和 scratch，补全成 docker.io/library/... 的写法
+app_base_images() { # app_base_images <项目目录> → 每行一个
+  awk '
+    function norm(r) { if (r !~ /\//) r = "library/" r; if (r !~ /^[^\/]*[.:][^\/]*\// && r !~ /^localhost\//) r = "docker.io/" r; return r }
+    toupper($1) == "ARG" { split($2, kv, "="); if (kv[2] != "") arg[kv[1]] = kv[2] }
+    toupper($1) == "FROM" {
+      img = ""; for (i = 2; i <= NF; i++) if ($i !~ /^--/) { img = $i; break }
+      while (match(img, /\$\{[A-Za-z_][A-Za-z0-9_]*\}/)) { v = substr(img, RSTART+2, RLENGTH-3); img = substr(img, 1, RSTART-1) arg[v] substr(img, RSTART+RLENGTH) }
+      for (i = 2; i <= NF; i++) if (toupper($i) == "AS") stage[$(i+1)] = 1
+      if (img != "" && img != "scratch" && !(img in stage) && !(img in seen)) { seen[img] = 1; print norm(img) }
+    }' "$1/Dockerfile"
+}
+
+# 基础镜像只拉一次（docs/56）：经 containerd 自己拉（它走 runtime 阶段配的代理，建集群时已经拉通过），
+# 之后 buildkit 按本机的用（image-resolve-mode=local），每次 deploy 不用再连 Docker Hub
+app_ensure_base_images() { # app_ensure_base_images <项目目录> [--pull]：0 都在本机，1 有拉不下来的
+  local dir="$1" pull="${2:-}" ref cri=(crictl --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock)
+  command -v crictl >/dev/null || { warn "没有 crictl：基础镜像交给 buildkit 自己去拉"; return 1; }
+  while IFS= read -r ref; do
+    [[ -n "$ref" ]] || continue
+    if [[ "$pull" != --pull ]] && "${cri[@]}" inspecti -q "$ref" >/dev/null 2>&1; then ok "基础镜像 $ref 在本机"; continue; fi
+    if [[ "$pull" == --pull ]]; then echo "▶ 重新拉基础镜像 $ref（--pull，经 containerd）"
+    else echo "▶ 拉基础镜像 $ref（经 containerd；本机有了以后 deploy 不再拉）"; fi
+    "${cri[@]}" pull "$ref" >/dev/null || { bad "基础镜像 $ref 拉不下来：看 containerd 的代理（runtime 阶段的 10-ladder2-proxy.conf）"; return 1; }
+    ok "$ref"
+  done < <(app_base_images "$dir")
+}
+
 # 节点本机用 buildkitd 构建（runtime 阶段装的，docs/55）：镜像直接进 containerd 的 k8s.io，kubelet 马上能用，不用 import
-image_build_buildkit() { # image_build_buildkit <项目目录> <镜像> [--platform x]
+image_build_buildkit() { # image_build_buildkit <项目目录> <镜像> [--platform x] [--pull]
   local dir="$1" ref="$2"; shift 2
   [[ $EUID -eq 0 ]] || die "buildkitd 的 socket 只给 root：sudo ./scripts/manage.sh …"
-  local platform="" i args=()
-  while (( $# )); do case "$1" in --platform) platform="${2:-}"; shift 2 ;; --platform=*) platform="${1#*=}"; shift ;; *) die "不认识的参数：$1" ;; esac; done
+  local platform="" i args=() pull="" local_base=0
+  while (( $# )); do case "$1" in --platform) platform="${2:-}"; shift 2 ;; --platform=*) platform="${1#*=}"; shift ;; --pull) pull=--pull; shift ;; *) die "不认识的参数：$1" ;; esac; done
+  # 指定了别的平台时基础镜像要那个平台的，本机拉的不一定对，交给 buildkit 自己拉
+  if [[ -z "$platform" ]] && app_ensure_base_images "$dir" "$pull"; then local_base=1; fi
   local rev; rev="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)"
   [[ -z "$(git -C "$ROOT" status --porcelain -- "$dir" 2>/dev/null)" ]] || rev="$rev-dirty"
   args=(--addr unix:///run/buildkit/buildkitd.sock build --frontend dockerfile.v0
@@ -524,13 +556,14 @@ image_build_buildkit() { # image_build_buildkit <项目目录> <镜像> [--platf
         --opt "label:dev.qpjoy.ladder2.revision=$rev"
         --output "type=image,name=$ref,unpack=true")
   [[ -n "$platform" ]] && args+=(--opt "platform=$platform")
+  (( local_base )) && args+=(--opt image-resolve-mode=local)
   [[ -n "${NPM_REGISTRY:-}" ]] && args+=(--opt "build-arg:NPM_REGISTRY=$NPM_REGISTRY")
   if [[ -n "${PROXY:-}" ]]; then
     # RUN 用宿主机网络（ladder2-buildkitd 的 --containerd-worker-net=host），连得上 127.0.0.1 上的代理
     for i in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do args+=(--opt "build-arg:$i=$PROXY"); done
     args+=(--opt "build-arg:NO_PROXY=localhost,127.0.0.1")
   fi
-  echo "▶ 用 buildkit 构建 $ref（$dir，修订 $rev），直接进本机 containerd"
+  echo "▶ 用 buildkit 构建 $ref（$dir，修订 $rev），直接进本机 containerd。没改到的层用缓存，不重新装依赖"
   buildctl "${args[@]}"
   ok "$ref（已在本机 containerd 的 k8s.io 里，不用 import）"
 }

@@ -306,6 +306,12 @@
       "date": "2026-11-22",
       "docs": "55",
       "decisions": "整合成两条命令：init <主机> 第一次按顺序做完准备阶段（runtime 里加 buildkit，镜像直接建进 containerd），deploy <项目> 每次上线（凭据第一次自动生成、镜像按 git 提交定版本、迁移和一次性步骤、验证）；host-nginx 的 404 是 reload 后检查太快"
+    },
+    {
+      "round": "第二十八轮",
+      "date": "2026-11-22",
+      "docs": "56",
+      "decisions": "deploy 的基础镜像经 containerd 只拉一次（--pull 重拉），buildkit 按本机的构建、不再连 Docker Hub；层缓存留在 s2，依赖只在 lockfile 变了时重装"
     }
   ]
 }

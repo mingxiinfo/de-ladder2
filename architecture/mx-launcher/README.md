@@ -48,7 +48,7 @@ PROXY=http://127.0.0.1:7788 ./scripts/manage.sh init s2
 
 **每次上线：** 依次做这些，每段计时：
 1. 凭据：第一次自动生成运维令牌，放在 `/var/lib/ladder2/secrets/mx-launcher/`，不进本工程；
-2. 镜像：版本按 git 提交算，本机没有就用 buildkit 构建，直接进 containerd；
+2. 镜像：版本按 git 提交算，本机没有就用 buildkit 构建，直接进 containerd。基础镜像只拉一次（`--pull` 重拉），没改到的层用缓存，依赖不每次重装（`docs/56`）；
 3. 检查；
 4. 一次性步骤：迁移、修复；
 5. apply；
