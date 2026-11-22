@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import type {
   OverseaBandwidthPolicy,
@@ -5689,9 +5690,33 @@ export function buildSiteSlotPlan(
   };
 }
 
-// L2 (de-ladder2 docs/52): MX_SITE_SLOT_SSH_ALLOWED_HOSTS limits every SSH profile, and so every
-// SSH this server runs, to the listed hosts. A per-profile ssh_config could alias a listed name to
-// another host, so it is refused while the allowlist is on. Empty list: L1 behaviour, no limit.
+// L2 (de-ladder2 docs/52, docs/57): MX_SITE_SLOT_SSH_ALLOWED_HOSTS limits every SSH profile, and so
+// every SSH this server runs, to the listed hosts. A per-profile ssh_config (the SSH profile bootstrap
+// writes one: Host <site> / HostName <host>) is read: every HostName must be listed, and ProxyJump /
+// ProxyCommand are refused because they reach other machines. Empty list: L1 behaviour, no limit.
+function sshConfigProblems(sshConfigFile: string, allowed: string[]): string[] {
+  let text: string;
+  try {
+    text = readFileSync(sshConfigFile, 'utf8');
+  } catch {
+    return [`SSH profile sshConfigFile ${sshConfigFile} cannot be read`];
+  }
+  const problems: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    const [key, ...rest] = line.split(/\s+|=/).filter(Boolean);
+    const lower = key.toLowerCase();
+    const value = rest.join(' ').trim();
+    if (lower === 'proxyjump' || lower === 'proxycommand' || lower === 'include' || lower === 'match') {
+      problems.push(`SSH profile sshConfigFile uses ${key}, which is not allowed while MX_SITE_SLOT_SSH_ALLOWED_HOSTS is set`);
+    } else if (lower === 'hostname' && !allowed.includes(value.toLowerCase())) {
+      problems.push(`SSH profile sshConfigFile points HostName ${value} outside MX_SITE_SLOT_SSH_ALLOWED_HOSTS (${allowed.join(', ')})`);
+    }
+  }
+  return problems;
+}
+
 export function assertSiteSlotSshHostAllowed(
   config: Pick<RuntimeConfig, 'siteSlotSshAllowedHosts'>,
   host: string | null,
@@ -5700,7 +5725,8 @@ export function assertSiteSlotSshHostAllowed(
   const allowed = (config.siteSlotSshAllowedHosts ?? []).map((value) => value.trim().toLowerCase()).filter(Boolean);
   if (!allowed.length) return;
   if (sshConfigFile) {
-    throw new Error('SSH profile sshConfigFile is not allowed while MX_SITE_SLOT_SSH_ALLOWED_HOSTS is set');
+    const problems = sshConfigProblems(sshConfigFile, allowed);
+    if (problems.length) throw new Error(problems.join('; '));
   }
   if (host && !allowed.includes(host.toLowerCase())) {
     throw new Error(`SSH profile host ${host} is not in MX_SITE_SLOT_SSH_ALLOWED_HOSTS (${allowed.join(', ')})`);

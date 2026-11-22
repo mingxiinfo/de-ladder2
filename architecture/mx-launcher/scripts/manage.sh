@@ -21,7 +21,7 @@ mx-launcher（architecture/mx-launcher）
   status              看集群里的状态 = ./scripts/manage.sh app status mx-launcher（要 --context）
   client-test         MinCave 客户端（demos/mx-h2i）：构建界面、跑界面测试和 L2 加的测试（要先 npm --prefix demos/mx-h2i/ui ci）
   client-package      还没实现：打安装包要 L1 的 workspace 包和 WireGuard 引擎，还没迁进来（docs/49）
-  client-env --domain <新域名>   打印测试客户端的 .env：domestic02 的地址按这次的取（inventory 或 LADDER2_DOMESTIC02_PUBLIC_IP，docs/54）
+  client-env [--domain <域名>]  打印测试客户端的 .env：域名默认取 inventory 里 domestic02 的 bootstrap_domain，地址按这次的取（docs/54、docs/57）
 
 部署、导入镜像、建 Secret 都用本工程的 ./scripts/manage.sh，必须带 --context（docs/46）。
 EOF
@@ -45,6 +45,7 @@ case "$cmd" in
     SITE_ROOT="$ROOT"; source "$ROOT/scripts/lib/site.sh"; site_load_env; site_check_env || exit 1
     domain=""
     while (( $# )); do case "$1" in --domain) domain="${2:-}"; shift 2 ;; --domain=*) domain="${1#*=}"; shift ;; *) echo "不认识的参数：$1" >&2; exit 1 ;; esac; done
+    [[ -n "$domain" ]] || domain="$(site_host_field "$ROOT/inventory/hosts.yaml" domestic02 bootstrap_domain)"
     [[ -n "$domain" ]] || { echo "用法：client-env --domain <新域名>（domestic02 上配了 HTTPS 的域名，docs/52）" >&2; exit 1; }
     relay="$(site_host_field "$ROOT/inventory/hosts.yaml" domestic02 public_ip)"
     site_ssh_allowlist "$ROOT/inventory/hosts.yaml" "$relay" >/dev/null || exit 1

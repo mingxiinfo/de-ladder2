@@ -53,7 +53,7 @@ Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节
 - 集群里的任何东西不用 hostPort 或 hostNetwork 占宿主机的 80 / 443。入口只有两个 Gateway 的 NodePort：`public` 30080、`internal` 30081（`docs/18`）。
 - 只对内网开放的应用，HTTPRoute 只挂 `internal`。不往 s1 的 Caddy 上加新路由。
 - etcd 和 SQLite 不放 NFS。数据库默认不放；确实要放的登记为冷库，单副本，备份放别处（`docs/20`）。
-- 云服务器和海外服务器是独立站点，不加入集群；不把公网机器放进控制面（`docs/16`、`docs/17`）。边缘机器（Domestic、跳板机）用 L1 tunnel-cli 的 `qp-tunnel-cli edge` 从 Internal 经 SSH 推送部署，不装 Kubernetes（`docs/37`）。按技术栈用 `--stack`（wg-nginx / open-nginx / hy2-mihomo），证书、密钥、域名放推送机的 `/var/lib/qp-tunnel/edge/state/<机器>/<组件>/` 或 `--state-dir`，不进包也不进 Git（`docs/38`、`docs/39`）。每台 Internal 都能当推送机（origin），机器记着谁管哪个组件，换推送机要 `--take-over`，`edge relations` 看关系（`docs/39`）。第一次推送只推新机器，推到现在那台 Domestic 等于改生产的 H2I 边缘；v1 Launcher 推的 `current/<组件>` 不要用 `--take-over` 接管，有 v1 组件的机器不要用 `--shared-host`。
+- 云服务器和海外服务器是独立站点，不加入集群；不把公网机器放进控制面（`docs/16`、`docs/17`）。边缘机器（Domestic、跳板机）用 L1 tunnel-cli 的 `qp-tunnel-cli edge` 从 Internal 经 SSH 推送部署，不装 Kubernetes（`docs/37`）。按技术栈用 `--stack`（wg-nginx / open-nginx / hy2-mihomo），证书、密钥、域名放推送机的 `/var/lib/qp-tunnel/edge/state/<机器>/<组件>/` 或 `--state-dir`，不进包也不进 Git（`docs/38`、`docs/39`）。每台 Internal 都能当推送机（origin），机器记着谁管哪个组件，换推送机要 `--take-over`，`edge relations` 看关系（`docs/39`）。第一次推送只推新机器，推到现在那台 Domestic 等于改生产的 H2I 边缘；v1 Launcher 推的 `current/<组件>` 不要用 `--take-over` 接管，有 v1 组件的机器不要用 `--shared-host`。例外是测试中继 domestic02：Launcher 从管理界面推 Domestic 包（中继、边缘、443 的 public-tls），边缘工具管隧道和 80，之后边缘工具往它推要加 `--shared-host`；443 留给 Launcher，边缘工具不在它上面配 443（`docs/57`）。
 - Git 里不放密码、token、私钥、`.ovpn`。
 
 ## 改 manage.sh 的规则
