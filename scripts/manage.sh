@@ -269,13 +269,29 @@ cmd_doctor() {
 
 # ---------- k8s ----------
 
+context_missing_hint() { # 没有这个 context 时，说清楚是集群还没建、只写给了 root，还是在运维机上没拷 kubeconfig
+  local ctx="$1" s2ip
+  s2ip="$(host_field s2 lan_ip 2>/dev/null || true)"
+  if [[ "$ctx" == ladder2 ]] && site_is_ipv4 "$s2ip" && local_ips | grep -qx "$s2ip"; then
+    if [[ ! -f /etc/kubernetes/admin.conf ]]; then
+      echo "kubeconfig 里没有 context ladder2：这台 s2 上还没建集群。按顺序做完阶段 host → runtime → cluster（cluster 会建集群并写 context ladder2），再 network、gateway、postgres、host-nginx，之后才能部署（docs/51）。看做到哪了：./scripts/manage.sh node verify s2"
+    elif [[ $EUID -ne 0 ]]; then
+      echo "kubeconfig 里没有 context ladder2：集群建了，但 cluster 阶段只把它写给了 root（/root/.kube/ladder2.conf）。用 sudo 运行，或者拷一份给自己（architecture/mx-launcher/README.md）"
+    else
+      echo "kubeconfig 里没有 context ladder2：集群建了（/etc/kubernetes/admin.conf 在），但 /root/.kube/config 里没有它。重跑 sudo ./scripts/manage.sh node prepare s2 cluster 会补上（已经建过就不再 init）"
+    fi
+  else
+    echo "kubeconfig 里没有 context：$ctx（kubectl config get-contexts 看有哪些）。在运维机上用的话，把 s2 的 /root/.kube/ladder2.conf 拷过来合并，并在 /etc/hosts 加一行 <s2 地址> k8s-api.ladder2.internal"
+  fi
+}
+
 need_context() { # 从参数里取 --context。写操作必须指名集群，不用当前默认的。
   local ctx=""
   while (( $# )); do
     case "$1" in --context) ctx="${2:-}"; shift 2 || true ;; --context=*) ctx="${1#*=}"; shift ;; *) shift ;; esac
   done
   [[ -n "$ctx" ]] || die "必须带 --context <名字>。s1 和 s2 是两个集群，这里不使用默认 context。"
-  kubectl config get-contexts -o name 2>/dev/null | grep -qx "$ctx" || die "kubeconfig 里没有 context：$ctx"
+  kubectl config get-contexts -o name 2>/dev/null | grep -qx "$ctx" || die "$(context_missing_hint "$ctx")"
   # 写操作不碰 s1 的集群（L1）：context 指向的 API 地址是 s1 的就拒绝
   local cl server ip
   cl="$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$ctx\")].context.cluster}")"
