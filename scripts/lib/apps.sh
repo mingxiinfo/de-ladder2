@@ -526,18 +526,35 @@ app_base_images() { # app_base_images <项目目录> → 每行一个
     }' "$1/Dockerfile"
 }
 
-# 基础镜像只拉一次（docs/56）：经 containerd 自己拉（它走 runtime 阶段配的代理，建集群时已经拉通过），
-# 之后 buildkit 按本机的用（image-resolve-mode=local），每次 deploy 不用再连 Docker Hub
+# 基础镜像只拉一次（docs/56）：拉进 containerd 的 k8s.io，之后 buildkit 按本机的用（image-resolve-mode=local），
+# 每次 deploy 不用再连 Docker Hub。有 crictl 就经 containerd 守护进程拉（走 runtime 阶段配的代理）；
+# 没有 crictl（s2 上就没有）用 ctr 拉，ctr 是自己发请求，代理取这条命令的 PROXY
+app_image_in_containerd() { # app_image_in_containerd <镜像>：0 在 k8s.io 里
+  ctr -n k8s.io images ls -q 2>/dev/null | grep -qxF "$1" && return 0
+  command -v crictl >/dev/null && crictl --runtime-endpoint unix:///run/containerd/containerd.sock \
+    --image-endpoint unix:///run/containerd/containerd.sock inspecti -q "$1" >/dev/null 2>&1
+}
 app_ensure_base_images() { # app_ensure_base_images <项目目录> [--pull]：0 都在本机，1 有拉不下来的
-  local dir="$1" pull="${2:-}" ref cri=(crictl --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock)
-  command -v crictl >/dev/null || { warn "没有 crictl：基础镜像交给 buildkit 自己去拉"; return 1; }
+  local dir="$1" pull="${2:-}" ref
+  command -v ctr >/dev/null || command -v crictl >/dev/null || { warn "没有 ctr 也没有 crictl：基础镜像交给 buildkit 自己去拉"; return 1; }
   while IFS= read -r ref; do
     [[ -n "$ref" ]] || continue
-    if [[ "$pull" != --pull ]] && "${cri[@]}" inspecti -q "$ref" >/dev/null 2>&1; then ok "基础镜像 $ref 在本机"; continue; fi
-    if [[ "$pull" == --pull ]]; then echo "▶ 重新拉基础镜像 $ref（--pull，经 containerd）"
-    else echo "▶ 拉基础镜像 $ref（经 containerd；本机有了以后 deploy 不再拉）"; fi
-    "${cri[@]}" pull "$ref" >/dev/null || { bad "基础镜像 $ref 拉不下来：看 containerd 的代理（runtime 阶段的 10-ladder2-proxy.conf）"; return 1; }
-    ok "$ref"
+    if [[ "$pull" != --pull ]] && app_image_in_containerd "$ref"; then ok "基础镜像 $ref 在本机"; continue; fi
+    if [[ "$pull" == --pull ]]; then echo "▶ 重新拉基础镜像 $ref（--pull）"
+    else echo "▶ 拉基础镜像 $ref（本机有了以后 deploy 不再拉）"; fi
+    if command -v crictl >/dev/null; then
+      crictl --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock \
+        pull "$ref" >/dev/null && { ok "$ref（经 containerd 的代理）"; continue; }
+      warn "crictl 没拉下来，改用 ctr"
+    fi
+    [[ -n "${PROXY:-}" ]] || warn "没有设 PROXY：国内直连 Docker Hub 多半不通，一般写成 PROXY=http://127.0.0.1:7788"
+    if env ${PROXY:+HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY" http_proxy="$PROXY" https_proxy="$PROXY"} \
+         NO_PROXY="localhost,127.0.0.1" ctr -n k8s.io images pull "$ref" >/dev/null; then
+      ok "$ref（ctr${PROXY:+，经 $PROXY}）"
+    else
+      bad "基础镜像 $ref 拉不下来。手工拉：HTTPS_PROXY=${PROXY:-http://127.0.0.1:7788} ctr -n k8s.io images pull $ref（要在 k8s.io 命名空间里，buildkit 才看得见）"
+      return 1
+    fi
   done < <(app_base_images "$dir")
 }
 
@@ -549,6 +566,11 @@ image_build_buildkit() { # image_build_buildkit <项目目录> <镜像> [--platf
   while (( $# )); do case "$1" in --platform) platform="${2:-}"; shift 2 ;; --platform=*) platform="${1#*=}"; shift ;; --pull) pull=--pull; shift ;; *) die "不认识的参数：$1" ;; esac; done
   # 指定了别的平台时基础镜像要那个平台的，本机拉的不一定对，交给 buildkit 自己拉
   if [[ -z "$platform" ]] && app_ensure_base_images "$dir" "$pull"; then local_base=1; fi
+  # buildkitd 自己的代理写在它的 unit 里（runtime 阶段按当时的 PROXY 写）。基础镜像在本机时用不到，不在本机时就靠它
+  if (( ! local_base )) && command -v systemctl >/dev/null \
+     && ! systemctl show ladder2-buildkitd -p Environment 2>/dev/null | grep -q 'HTTPS_PROXY='; then
+    warn "ladder2-buildkitd 没有配代理，它自己连不上 Docker Hub：PROXY=http://127.0.0.1:7788 ./scripts/manage.sh node prepare s2 runtime 会补上"
+  fi
   local rev; rev="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)"
   [[ -z "$(git -C "$ROOT" status --porcelain -- "$dir" 2>/dev/null)" ]] || rev="$rev-dirty"
   args=(--addr unix:///run/buildkit/buildkitd.sock build --frontend dockerfile.v0
