@@ -25,6 +25,7 @@ projects:
       luopan: 使用 standalone launcher 的 quasar 项目，用来测 launcher 的网络、权限、用户
     hard_rule: 任何改动不得影响 MX-H2I 现有用户登录和现有联网
     l2_state: migrating
+    l2_seen: 2026-11-22 用户在 s2 上 deploy 跑通，验证全部通过（docs/55）。这是复刻，MX-H2I 的用户流量仍在 s1
     migrate_order: 第一个在 s2 上复刻；用户流量的切换排最后（docs/36）
     # 2026-11-22 从 L1 pro 1d9555e8 拷来，L2 的改动在这里做；清单和镜像写好了，没在集群上部署过（docs/46）
     l2_source: architecture/mx-launcher

@@ -21,4 +21,9 @@ PROXY=http://127.0.0.1:7788 ./scripts/manage.sh node prepare s2 host-nginx
 PROXY=http://127.0.0.1:7788 ./scripts/manage.sh init s2
 # ladder2
 PROXY=http://127.0.0.1:7788 ./scripts/manage.sh deploy mx-launcher --context ladder2
+
+# prepare
+PROXY=http://127.0.0.1:7788 ./scripts/manage.sh deploy mx-launcher --context ladder2
+HTTPS_PROXY=http://127.0.0.1:7788 ctr -n k8s.io images pull docker.io/library/node:22-alpine
+PROXY=http://127.0.0.1:7788 ./scripts/manage.sh node prepare s2 runtime
 ```

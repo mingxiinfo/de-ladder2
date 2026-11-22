@@ -7,17 +7,20 @@
 # 什么时候归档：s2 这套跑过以后就可以 app once archive。
 source "$LADDER2_ROOT/scripts/lib/hook.sh"
 kn exec deploy/mx-launcher-internal -c internal-api -- node --input-type=module -e '
-const post = async (path) => {
+// 和管理界面 DNS 页面的 Apply 按钮发的一样（desktop/renderer.js）。serverDryRun: false 一定要写：
+// 不写时接口默认只做 Kubernetes 的 server dry-run，返回 201 但 applied: false，什么都没改（s2 上第一次部署就是这样）
+const post = async (path, extra = {}) => {
   const response = await fetch("http://127.0.0.1:18090" + path, {
     method: "POST",
     headers: { "content-type": "application/json", "x-mx-ops-token": process.env.MX_INTERNAL_OPS_TOKEN ?? "" },
-    body: JSON.stringify({ confirmApply: true, actor: "ladder2-once", requestId: "ladder2-once-0001" })
+    body: JSON.stringify({ appId: "sdk-gateway", confirmApply: true, serverDryRun: false, actor: "ladder2-once", requestId: "ladder2-once-0001", ...extra })
   });
   const body = await response.json().catch(() => ({}));
   const result = body.result ?? {};
-  console.log(`  ${path} → HTTP ${response.status} ${result.status ?? ""} ${result.message ?? body.message ?? ""}`);
-  if (!response.ok || result.status === "failed" || result.applied === false) process.exitCode = 1;
+  console.log(`  ${path} → HTTP ${response.status} ${result.status ?? ""} applied=${result.applied} ${result.message ?? body.message ?? ""}`);
+  if (!response.ok || result.status === "failed" || result.applied !== true) process.exitCode = 1;
 };
-await post("/internal/v1/dns/gateway/configmap/apply");
+// k8s：写 ConfigMap mx-internal-gateway-caddy，应用网关（nginx）读它（界面上的"Caddy 80"按钮，docs/47）
+await post("/internal/v1/dns/gateway/configmap/apply", { gatewayApplyBackend: "k8s" });
 await post("/internal/v1/dns/coredns/configmap/apply");
 '
