@@ -39,7 +39,10 @@
 | `demos/mx-h2i/src/main-runtime.cjs`、`src/mincave-admin.cjs`、`src/renderer.js` | 新增 `MX_H2I_MINCAVE_PASSWORD_LOGIN`：MinCave 里放行账号密码登录，登录页多一个默认隐藏的密码表单，桥要求服务端回员工（`docs/49`） |
 | `demos/mx-h2i/ui/src/App.tsx`、`bridge.ts`、`styles.css` | 登录页 logo 1.5 秒内连点 5 下展开密码表单 |
 | `server/src/config.ts`、`types.ts`、`server/src/store/domain.ts`、`memory.ts`、`postgres.ts` | 新增 `MX_SITE_SLOT_SSH_ALLOWED_HOSTS`：SSH 配置写入和读出都只认名单里的机器，名单打开时不许自带 ssh_config（`docs/52`） |
-| `server/src/store/site-slot-ssh-allowlist.test.ts` | 新增 3 项 |
+| `server/src/store/site-slot-ssh-allowlist.test.ts` | 新增；`docs/57` 起白名单读 ssh_config，只放行 HostName 都在名单里的 |
+| `server/src/config.ts`、`types.ts`、`store/domain.ts`、`modules/config-center/config-center.controller.ts` | 新增 `MX_DOMESTIC_DEFAULT_SITE_ID`、`MX_DOMESTIC_DEFAULT_BOOTSTRAP_HOST`：新 Domestic 配置的默认值，列表接口多返回 `defaults`（`docs/58`） |
+| `server/src/store/domestic-runtime-defaults.test.ts` | 新增 3 项 |
+| `desktop/renderer.js`、`desktop/scripts/domestic-runtime-config.test.mjs` | Domestic Runtime Config：站点能输入、按站点记未保存的修改、默认值取服务端的（`docs/58`） |
 | `demos/mx-h2i/ui/tests/dom.test.mjs`、`scripts/mincave-password-login.test.mjs`、`package.json` | 新增测试，并加进 `check` |
 
 ## L2 新加的文件（不在 L1 里）

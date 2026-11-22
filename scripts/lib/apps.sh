@@ -827,6 +827,11 @@ check_launcher_consistency() { # architecture/mx-launcher 里要一致的几处�
     ok "Launcher 往外 SSH 只能到：$(echo $allow)（config.env 写 $v，地址来自 $(site_field_source domestic02 public_ip)，docs/54）"
     [[ "$v" == *@*@* ]] || warn "MX_SITE_SLOT_SSH_ALLOWED_HOSTS 写死了地址 $v：改成 @DOMESTIC02_PUBLIC_IP@，换地址时只改 inventory（docs/54）"
   fi
+  # 管理界面 Domestic 新建站点的默认值（docs/58）：域名和 inventory 里 domestic02 的 bootstrap_domain 一致
+  local dd; dd="$(host_field domestic02 bootstrap_domain)"
+  if [[ -n "$dd" && "$(cfgv MX_DOMESTIC_DEFAULT_BOOTSTRAP_HOST)" == "$dd" && "$(cfgv MX_DOMESTIC_DEFAULT_SITE_ID)" == domestic02 ]]; then
+    ok "管理界面 Domestic 的默认站点是 domestic02、默认域名是 $dd（docs/58）"
+  else bad "config.env 的 MX_DOMESTIC_DEFAULT_SITE_ID / MX_DOMESTIC_DEFAULT_BOOTSTRAP_HOST 要是 domestic02 / ${dd:-（inventory 没写）}（docs/58）"; fi
   # app apply 先 platform/、再 bootstrap/、最后 overlay：overlay 用到的命名空间要在 platform/ 里建好，否则第一次部署在 bootstrap 那步就停
   local want have miss=""
   # 只看 metadata.namespace（两格缩进），不算 parentRefs 里引用的 gateway 这类别人的命名空间

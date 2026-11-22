@@ -5956,13 +5956,24 @@ function validWireGuardKeyMaterial(value: string | null | undefined): boolean {
   return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
 }
 
+// L2 (de-ladder2 docs/58): MX_DOMESTIC_DEFAULT_SITE_ID / MX_DOMESTIC_DEFAULT_BOOTSTRAP_HOST replace the
+// L1 defaults for a config that does not exist yet. The admin UI reads them from the list endpoint.
+export function domesticRuntimeDefaults(config: Pick<RuntimeConfig, 'domesticDefaultSiteId' | 'domesticDefaultBootstrapHost'>) {
+  const siteId = config.domesticDefaultSiteId?.trim();
+  const bootstrapHost = normalizePublicTlsDnsHostname(config.domesticDefaultBootstrapHost?.trim() || '');
+  return {
+    siteId: siteId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(siteId) ? siteId : 'domestic-main',
+    bootstrapHost: bootstrapHost || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST
+  };
+}
+
 export function buildSiteSlotDomesticRuntimeConfig(
   config: RuntimeConfig,
   input: SiteSlotDomesticRuntimeConfigInput,
   previous: SiteSlotDomesticRuntimeConfig | null,
   now = new Date().toISOString()
 ): SiteSlotDomesticRuntimeConfig {
-  const siteId = input.siteId?.trim() || previous?.siteId || 'domestic-main';
+  const siteId = input.siteId?.trim() || previous?.siteId || domesticRuntimeDefaults(config).siteId;
   const status = input.status === 'paused' ? 'paused' : 'active';
   const requestedEdgeBind = input.edgeBind?.trim() || previous?.edge.bind || '127.0.0.1';
   const edgeBind = validIpv4Address(requestedEdgeBind) ? requestedEdgeBind : '127.0.0.1';
@@ -5970,7 +5981,7 @@ export function buildSiteSlotDomesticRuntimeConfig(
   const bootstrapProtocol = normalizeProtocol(input.bootstrapProtocol || previousBootstrapProtocol(previous) || 'https');
   const requestedBootstrapHost = input.bootstrapHost?.trim()
     || previousBootstrapHost(previous)
-    || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST;
+    || domesticRuntimeDefaults(config).bootstrapHost;
   const normalizedBootstrapHost = normalizePublicTlsDnsHostname(requestedBootstrapHost);
   const usesLegacyBootstrapHost = normalizedBootstrapHost === MX_LEGACY_PUBLIC_BOOTSTRAP_HOST;
   const bootstrapHost = usesLegacyBootstrapHost

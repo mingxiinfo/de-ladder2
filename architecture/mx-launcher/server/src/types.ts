@@ -39,6 +39,9 @@ export interface RuntimeConfig {
   mincavePasswordLoginEnabled?: boolean;
   /** L2: SSH profiles may only target these hosts when non-empty. */
   siteSlotSshAllowedHosts?: string[];
+  /** L2: defaults for a new Domestic runtime config. */
+  domesticDefaultSiteId?: string | null;
+  domesticDefaultBootstrapHost?: string | null;
   feishuAppId: string | null;
   feishuAppSecret: string | null;
   feishuAllowedTenantKeys: string[];

@@ -63,6 +63,7 @@
 | 55 | [两条命令：init 和 deploy](55.init-and-deploy.md) | `init <主机>` 第一次按顺序做完 8 个准备阶段（含 buildkit），失败修好再跑；`deploy <项目>` 每次上线：凭据（第一次生成）→ 镜像（按提交定版本，本机 buildkit 构建）→ 检查 → 一次性步骤 → apply → 等滚动 → 验证；host-nginx 的 404 是 reload 后检查太快 |
 | 56 | [基础镜像只拉一次，依赖不每次重装](56.base-images-once-and-build-cache.md) | deploy 先经 containerd 把 Dockerfile 的基础镜像拉到本机（只拉一次，`--pull` 重拉），buildkit 用 `image-resolve-mode=local` 构建，不再连 Docker Hub；层缓存留在 s2，只改业务代码时只重做 build 那几步 |
 | 57 | [从 internal02 往 domestic02 推：命令行和管理界面各管一块](57.push-to-domestic02-cli-and-admin-ui.md) | 命令行（边缘工具、`relay`）管隧道、80、docker、镜像、Launcher 公钥；管理界面（Domestic plan）管中继、边缘、DNS 和 443 的 public-tls，证书自动签；`mincave.minsight-ai.com`；白名单接受 bootstrap 写的 ssh_config |
+| 58 | [Domestic Runtime Config：站点能输入，改了不丢](58.domestic-runtime-config-editable.md) | s2 没拷线上配置，截图里是代码默认值；Domestic Site 改成能输入新站点；按站点记未保存的修改；新站点默认值由 `MX_DOMESTIC_DEFAULT_SITE_ID` / `MX_DOMESTIC_DEFAULT_BOOTSTRAP_HOST` 设，s2 是 domestic02 / mincave.minsight-ai.com |
 
 **接着做：先读 29，再读 30、33、34。要在 s2 上动手，读 35。Launcher 和 L1 自己的服务怎么上 s2，读 36；动手做 Launcher v2 和 MX-H2I v2 之前，读 45；项目放哪、Launcher 怎么部署到 s2，读 46、47、48。加 Domestic、往边缘推送部署，读 37，再读 38、39、40、41、42、43、44。** 31、32 讲的是查看文档用的站点，不是架构。33、34 是海外的 toC 站点，大部分和 s2 无关，可以并行；NAS 读写那一段要等 s2。 第一次读：01 → 16 → 21 → 27 → 03 → 17 → 11。要动手：14 → 19 → 22 → 12。
 

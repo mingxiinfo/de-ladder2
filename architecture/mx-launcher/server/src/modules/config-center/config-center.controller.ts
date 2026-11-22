@@ -28,6 +28,7 @@ import { buildAwxProviderSyncPlan } from './awx-provider-sync-plan.js';
 import { prepareSiteSlotSshProfileBootstrap } from './ssh-profile-bootstrap.js';
 import { SSH_READONLY_PROBE_FEATURE_KEY, buildSshProfileReadinessProbe } from './ssh-profile-readiness.js';
 import { generateWireGuardKeyPair } from './wireguard-keys.js';
+import { domesticRuntimeDefaults } from '../../store/domain.js';
 
 @Controller()
 export class ConfigCenterController {
@@ -293,7 +294,8 @@ export class ConfigCenterController {
 
   @Get('internal/v1/config-center/domestic-runtime-configs')
   async listDomesticRuntimeConfigs() {
-    return { configs: await this.store.listSiteSlotDomesticRuntimeConfigs() };
+    // defaults: what a new site gets (L2 docs/58: env, otherwise the L1 defaults)
+    return { configs: await this.store.listSiteSlotDomesticRuntimeConfigs(), defaults: domesticRuntimeDefaults(this.config) };
   }
 
   @Get('internal/v1/config-center/domestic-runtime-configs/:siteId')

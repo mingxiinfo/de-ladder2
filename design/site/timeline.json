@@ -318,6 +318,12 @@
       "date": "2026-11-22",
       "docs": "57",
       "decisions": "往 domestic02 推按组件分：命令行（边缘工具、relay）管隧道、80、docker、镜像和 Launcher 公钥；管理界面的 Domestic plan 管中继、边缘、DNS 和 443 的 public-tls（mincave.minsight-ai.com 自动签证书）；边缘工具之后对 domestic02 用 --shared-host"
+    },
+    {
+      "round": "第三十轮",
+      "date": "2026-11-22",
+      "docs": "58",
+      "decisions": "管理界面 Domestic Runtime Config 的站点能输入新站点、改了不丢；新站点默认值按环境设，s2 是 domestic02 / mincave.minsight-ai.com；s2 的库没拷线上配置"
     }
   ]
 }

@@ -293,7 +293,10 @@ const state = {
   },
   domesticRuntime: {
     configs: [],
-    selectedSiteId: 'domestic-main',
+    // L2 (de-ladder2 docs/58): null until the operator picks or types a site; defaults come from the server
+    selectedSiteId: null,
+    defaults: null,
+    drafts: {},
     feedback: null,
     busy: false,
     applyBusy: false,
@@ -1611,6 +1614,7 @@ async function refreshAdmin() {
       await ensureLauncherProductUserAccess(selectedProductId, { force: true, render: false });
     }
     state.domesticRuntime.configs = asArray(domesticRuntimePayload.configs);
+    state.domesticRuntime.defaults = domesticRuntimePayload.defaults || null;
     state.domesticRuntime.error = domesticRuntimePayload.error || null;
     applySecretCenterPayload(secretCenterPayload);
     state.dnsCenter.policy = dnsPolicyPayload.policy || null;
@@ -9988,7 +9992,7 @@ function overseaPublicSubscriptionBase() {
   const config = configs.find((item) => item?.siteId === selected) || configs[0] || null;
   const configured = String(config?.edge?.publicBaseUrl || '').trim();
   if (configured) return configured.replace(/\/+$/, '');
-  return 'https://h2i.minsight-ai.com';
+  return `https://${domesticRuntimeServerDefaults().bootstrapHost}`;
 }
 
 async function ensureSystemSubscriptionAccounts() {
@@ -15871,16 +15875,29 @@ function secretCenterFormBody(root, prefix) {
   return fields;
 }
 
+// L2 (de-ladder2 docs/58): defaults for a site that has no saved config yet. The server sends them with
+// the config list (MX_DOMESTIC_DEFAULT_SITE_ID / MX_DOMESTIC_DEFAULT_BOOTSTRAP_HOST); without them the
+// L1 defaults stay (domestic-main, the canonical public bootstrap host).
+const DOMESTIC_RUNTIME_SITE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+function domesticRuntimeServerDefaults() {
+  const defaults = (typeof state !== 'undefined' && state?.domesticRuntime?.defaults) || {};
+  return {
+    siteId: typeof defaults.siteId === 'string' && DOMESTIC_RUNTIME_SITE_ID_PATTERN.test(defaults.siteId) ? defaults.siteId : 'domestic-main',
+    bootstrapHost: typeof defaults.bootstrapHost === 'string' && defaults.bootstrapHost ? defaults.bootstrapHost : MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST
+  };
+}
+
 function renderDomesticRuntimeConfigPanel() {
   const config = domesticRuntimeConfigForRender();
   const bootstrap = domesticRuntimeBootstrapParts(config);
   const feedback = state.domesticRuntime.feedback;
   const apply = state.domesticRuntime.applyResult;
+  const defaults = domesticRuntimeServerDefaults();
   const siteIds = uniqueText([
     ...asArray(state.domesticRuntime.configs).map((item) => item.siteId),
     state.domesticRuntime.selectedSiteId,
     selectedDomesticSiteId(),
-    'domestic-main'
+    defaults.siteId
   ]);
   const warnings = asArray(config.warnings);
   const isBusy = state.domesticRuntime.busy || state.domesticRuntime.applyBusy;
@@ -15902,9 +15919,10 @@ function renderDomesticRuntimeConfigPanel() {
       <div class="foundation-operation-grid domestic-runtime-grid">
         <label class="form-field">
           <span>Domestic Site</span>
-          <select data-domestic-runtime-site data-domestic-runtime-field="siteId">
-            ${siteIds.map((siteId) => `<option value="${escapeHtml(siteId)}" ${siteId === config.siteId ? 'selected' : ''}>${escapeHtml(siteId)}</option>`).join('')}
-          </select>
+          <input data-domestic-runtime-site data-domestic-runtime-field="siteId" list="domestic-runtime-site-options" autocomplete="off" value="${escapeHtml(config.siteId)}" placeholder="${escapeHtml(defaults.siteId)}" title="选一个已有的站点，或输入新站点名后回车" />
+          <datalist id="domestic-runtime-site-options">
+            ${siteIds.map((siteId) => `<option value="${escapeHtml(siteId)}"></option>`).join('')}
+          </datalist>
         </label>
         <label class="form-field compact-field">
           <span>Status</span>
@@ -15922,7 +15940,7 @@ function renderDomesticRuntimeConfigPanel() {
         </label>
         <label class="form-field">
           <span>Bootstrap Host</span>
-          <input data-domestic-runtime-field="bootstrapHost" autocomplete="off" value="${escapeHtml(bootstrap.host)}" placeholder="${MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST}" />
+          <input data-domestic-runtime-field="bootstrapHost" autocomplete="off" value="${escapeHtml(bootstrap.host)}" placeholder="${escapeHtml(defaults.bootstrapHost)}" />
         </label>
         <label class="form-field compact-field">
           <span>Bootstrap Port</span>
@@ -15981,20 +15999,22 @@ function renderDomesticRuntimeConfigPanel() {
 }
 
 function domesticRuntimeConfigForRender() {
-  const selected = state.domesticRuntime.selectedSiteId || selectedDomesticSiteId() || 'domestic-main';
-  return asArray(state.domesticRuntime.configs).find((config) => config?.siteId === selected)
-    || asArray(state.domesticRuntime.configs)[0]
+  const selected = state.domesticRuntime.selectedSiteId || selectedDomesticSiteId() || domesticRuntimeServerDefaults().siteId;
+  const configs = asArray(state.domesticRuntime.configs);
+  // A site the operator typed that has no saved config yet gets defaults, not another site's config
+  return configs.find((config) => config?.siteId === selected)
+    || (state.domesticRuntime.selectedSiteId ? null : configs[0])
     || domesticRuntimeDefaultConfig(selected);
 }
 
-function domesticRuntimeDefaultConfig(siteId = 'domestic-main') {
+function domesticRuntimeDefaultConfig(siteId = domesticRuntimeServerDefaults().siteId) {
   return {
     siteId,
     status: 'active',
     edge: {
       bind: '127.0.0.1',
       port: 18090,
-      publicBaseUrl: `https://${MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST}`
+      publicBaseUrl: `https://${domesticRuntimeServerDefaults().bootstrapHost}`
     },
     upstreams: {
       internalBaseUrl: 'http://10.88.88.88:18090',
@@ -16018,13 +16038,13 @@ function domesticRuntimeBootstrapParts(config) {
     const port = Number(parsed.port || (protocol === 'https' ? 443 : 80));
     return {
       protocol,
-      host: parsed.hostname || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST,
+      host: parsed.hostname || domesticRuntimeServerDefaults().bootstrapHost,
       port: Number.isFinite(port) ? port : (edge.port || 18090)
     };
   } catch {
     return {
       protocol: 'https',
-      host: MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST,
+      host: domesticRuntimeServerDefaults().bootstrapHost,
       port: 443
     };
   }
@@ -16069,13 +16089,35 @@ function renderDomesticRuntimeApplyResult(apply) {
 
 function bindDomesticRuntimeControls(root) {
   const siteSelect = root.querySelector('[data-domestic-runtime-site]');
+  // L2 (de-ladder2 docs/58): the site is a text box with suggestions, so a new site (for example the
+  // test relay domestic02) can be typed; unsaved edits are kept per site across re-renders.
+  const currentSiteId = domesticRuntimeConfigForRender().siteId;
   if (siteSelect) {
     siteSelect.addEventListener('change', () => {
-      state.domesticRuntime.selectedSiteId = siteSelect.value || 'domestic-main';
-      state.domesticRuntime.feedback = null;
+      const typed = siteSelect.value.trim();
+      if (!typed) { siteSelect.value = currentSiteId; return; }
+      if (!DOMESTIC_RUNTIME_SITE_ID_PATTERN.test(typed)) {
+        state.domesticRuntime.feedback = { kind: 'error', message: `站点名只能用字母、数字、点、下划线、横线（最长 63）：${typed}` };
+        renderDomesticRuntimeContext(root);
+        return;
+      }
+      state.domesticRuntime.selectedSiteId = typed;
+      state.domesticRuntime.feedback = asArray(state.domesticRuntime.configs).some((item) => item?.siteId === typed)
+        ? null
+        : { kind: 'info', message: `新站点 ${typed}：下面是默认值，改好后 Save Config` };
       renderDomesticRuntimeContext(root);
     });
   }
+  const drafts = state.domesticRuntime.drafts || (state.domesticRuntime.drafts = {});
+  const draft = drafts[currentSiteId] || {};
+  let restored = false;
+  for (const field of root.querySelectorAll('[data-domestic-runtime-field]')) {
+    const name = field.dataset.domesticRuntimeField;
+    if (field === siteSelect || !(name in draft)) continue;
+    field.value = draft[name];
+    restored = true;
+  }
+  if (restored) refreshDomesticRuntimeDraftSummary(root);
   const save = root.querySelector('[data-domestic-runtime-save]');
   if (save) save.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: false, root }));
   const apply = root.querySelector('[data-domestic-runtime-apply]');
@@ -16083,6 +16125,7 @@ function bindDomesticRuntimeControls(root) {
   for (const field of root.querySelectorAll('[data-domestic-runtime-field]')) {
     if (field === siteSelect) continue;
     field.addEventListener(field.tagName === 'SELECT' ? 'change' : 'input', () => {
+      drafts[currentSiteId] = { ...(drafts[currentSiteId] || {}), [field.dataset.domesticRuntimeField]: field.value };
       refreshDomesticRuntimeDraftSummary(root);
     });
   }
@@ -16107,8 +16150,8 @@ function refreshDomesticRuntimeDraftSummary(root = foundationGrid) {
 
 function domesticRuntimeFormPayload(root = foundationGrid) {
   const value = (field) => root.querySelector(`[data-domestic-runtime-field="${field}"]`)?.value?.trim() || '';
-  const siteId = value('siteId') || state.domesticRuntime.selectedSiteId || selectedDomesticSiteId() || 'domestic-main';
-  const bootstrapHost = value('bootstrapHost') || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST;
+  const siteId = value('siteId') || state.domesticRuntime.selectedSiteId || selectedDomesticSiteId() || domesticRuntimeServerDefaults().siteId;
+  const bootstrapHost = value('bootstrapHost') || domesticRuntimeServerDefaults().bootstrapHost;
   return {
     siteId,
     status: value('status') === 'paused' ? 'paused' : 'active',
@@ -16159,7 +16202,10 @@ async function saveDomesticRuntimeConfigFromAdmin(options = {}) {
       });
       const apply = payload.apply || null;
       state.domesticRuntime.applyResult = apply;
-      if (apply?.config) upsertDomesticRuntimeConfig(apply.config);
+      if (apply?.config) {
+        upsertDomesticRuntimeConfig(apply.config);
+        if (state.domesticRuntime.drafts) delete state.domesticRuntime.drafts[body.siteId];
+      }
       state.domesticRuntime.feedback = {
         kind: apply?.status === 'passed' ? 'success' : apply?.status === 'blocked' ? 'warning' : 'error',
         message: apply?.status === 'passed'
@@ -16171,7 +16217,10 @@ async function saveDomesticRuntimeConfigFromAdmin(options = {}) {
         method: 'POST',
         body
       });
-      if (payload.config) upsertDomesticRuntimeConfig(payload.config);
+      if (payload.config) {
+        upsertDomesticRuntimeConfig(payload.config);
+        if (state.domesticRuntime.drafts) delete state.domesticRuntime.drafts[body.siteId];
+      }
       state.domesticRuntime.feedback = {
         kind: 'success',
         message: `Saved ${payload.config?.edge?.publicBaseUrl || body.siteId}`
@@ -17411,7 +17460,7 @@ function selectedDomesticSiteId() {
   const pipeline = asArray(state.dashboard?.siteSlotPipelines)
     .find((item) => item.kind === 'domestic' && item.siteId === state.selectedSiteId)
     || asArray(state.dashboard?.siteSlotPipelines).find((item) => item.kind === 'domestic');
-  return pipeline?.siteId || 'domestic-main';
+  return pipeline?.siteId || domesticRuntimeServerDefaults().siteId;
 }
 
 function renderEvidenceHistory(pipelines) {
