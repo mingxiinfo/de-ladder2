@@ -1,4 +1,6 @@
-# 平台为 mx-launcher 建的命名空间、配额、默认限额（docs/46）。由 app apply 先于 overlay 应用。
+# 平台为 mx-launcher 建的命名空间、配额、默认限额（docs/46）。由 app apply 先于 bootstrap/ 和 overlay 应用。
+# 两个命名空间：mx-internal-shadow（API、库、应用网关）和 mx-dns（分流 DNS，docs/47）。
+# bootstrap/coredns-config.yaml 在 mx-dns 里，所以 mx-dns 也要在这里先建，不能等 overlay。
 # 名字沿用 L1 的 mx-internal-shadow（docs/36）：Launcher 的代码里写死了这个命名空间
 # （例如网关 Caddyfile 里的 mx-launcher-internal.mx-internal-shadow.svc.cluster.local）。
 # L1 里它是正式环境，不是影子环境（CLAUDE.md）；这里是 s2 上的复刻，环境名是 ladder2。
@@ -14,7 +16,18 @@ metadata:
     mx.qpjoy.com/environment: ladder2
     mx.qpjoy.com/site-role: internal
 ---
-# 估算：API 1 CPU / 1Gi，pg-launcher 4 CPU / 4Gi（数字沿用 L1 的 limits），Caddy 每台 0.2 CPU，留出滚动更新的余量。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mx-dns
+  labels:
+    ladder2/project: mx-launcher
+    app.kubernetes.io/name: mx-internal-coredns
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/environment: ladder2
+    mx.qpjoy.com/site-role: internal
+---
+# 估算：API 1 CPU / 1Gi，pg-launcher 4 CPU / 4Gi（数字沿用 L1 的 limits），应用网关（nginx）每台 0.5 CPU，留出滚动更新的余量。
 apiVersion: v1
 kind: ResourceQuota
 metadata:

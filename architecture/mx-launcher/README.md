@@ -37,7 +37,17 @@ service peer 是 `10.88.88.88`：Launcher 的 Internal 角色地址，跟着角�
 
 ## 在 s2 上部署
 
-前提是 `docs/35` 的这几个阶段做完了：集群（会给 s2 打 `mx.ladder2/site-peer=true`）、local-path、网关、CloudNativePG（`k8s platform postgres`）、host-nginx。
+前提是 `docs/35` 的这几个阶段做完了：集群（会给 s2 打 `mx.ladder2/site-peer=true`）、local-path、网关、CloudNativePG（`k8s platform postgres`）、host-nginx。先看一遍：
+
+```bash
+sudo ./scripts/manage.sh node verify s2
+```
+
+cluster 阶段只把 kubeconfig 写给 root（`/root/.kube/ladder2.conf`）。下面不带 `sudo` 的命令用自己的用户跑，要先拷一份（已经有 `~/.kube/config` 的话不会覆盖，改用 `KUBECONFIG=~/.kube/config:~/.kube/ladder2.conf kubectl config view --flatten` 合并）：
+
+```bash
+mkdir -p ~/.kube && sudo install -m 600 -o "$USER" /root/.kube/ladder2.conf ~/.kube/ladder2.conf && { [ -e ~/.kube/config ] || cp ~/.kube/ladder2.conf ~/.kube/config; }
+```
 
 构建镜像，导入节点：
 

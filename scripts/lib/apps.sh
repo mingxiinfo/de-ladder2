@@ -424,7 +424,8 @@ cmd_image() {
       done
       [[ $EUID -eq 0 ]] || die "导入 containerd 要 root：sudo ./scripts/manage.sh image import $proj --context $ctx"
       command -v ctr >/dev/null || die "本机没有 ctr（containerd）。image import 要在集群的节点上运行"
-      local me; me="$(hostname | tr '[:upper:]' '[:lower:]')"
+      # 和 cluster 阶段一样用短主机名（40-cluster.sh 把 hostname -s 写成节点名）
+      local me; me="$(hostname -s | tr '[:upper:]' '[:lower:]')"
       kubectl --context "$ctx" --request-timeout=10s get node "$me" >/dev/null 2>&1 \
         || die "本机（$me）不是集群 $ctx 的节点。镜像要导入到会运行它的那台机器上，每个节点各跑一次"
       if [[ -n "$tarf" ]]; then
@@ -589,6 +590,14 @@ check_launcher_consistency() { # architecture/mx-launcher 里要一致的几处�
   if cfgv MX_ENABLED_MODULES | tr ',' ' ' | grep -qw edge-sync; then bad "MX_ENABLED_MODULES 里有 edge-sync：切换前必须去掉（docs/36）"; off=0; fi
   if grep -qE 'name: SITE_SLOT_' "$d/deploy/k8s/base/api.yaml"; then bad "api.yaml 用 env 设了 SITE_SLOT_*，会盖掉 config.env 的 0（L1 的写法）"; off=0; fi
   (( off )) && ok "切换前必须关的开关都关着：site-slot 远程执行、WG 密钥导出、edge-sync（docs/36）"
+  # app apply 先 platform/、再 bootstrap/、最后 overlay：overlay 用到的命名空间要在 platform/ 里建好，否则第一次部署在 bootstrap 那步就停
+  local want have miss=""
+  # 只看 metadata.namespace（两格缩进），不算 parentRefs 里引用的 gateway 这类别人的命名空间
+  want="$( { cat "$d"/deploy/k8s/bootstrap/*.yaml 2>/dev/null; kubectl kustomize "$ov" 2>/dev/null; } | awk '/^  namespace: /{print $2}' | sort -u)"
+  have="$(awk '/^kind: Namespace/{n=1;next} n && $1=="name:"{print $2; n=0}' "$d"/deploy/k8s/platform/*.yaml | sort -u)"
+  for v in $want; do grep -qx "$v" <<<"$have" || miss+=" $v"; done
+  if [[ -z "$miss" ]]; then ok "用到的命名空间（$(echo $want)）都在 platform/ 里先建"
+  else bad "platform/ 里没建这些命名空间：$miss（第一次 app deploy 会在 bootstrap 那步失败）"; fi
   local f
   for f in "$d"/deploy/preflight.sh "$d"/deploy/verify.sh "$d"/deploy/once/*.sh; do
     [[ -f "$f" ]] || continue
