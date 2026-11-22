@@ -59,8 +59,10 @@ ${B}两条常用的${O}（docs/55）
   deploy <项目> [环境] [--full] [--pull] --context <名字>   每次上线一条命令：凭据（第一次自动生成）→ 镜像（按 git 提交定版本，本机构建，
                                                      没改到的层用缓存；基础镜像只拉一次，--pull 才重拉）→ 检查 → 迁移和一次性步骤 → apply → 等滚动 → 验证。在节点上用 root 运行
 
-  relay <主机> check|docker|images|launcher-key      在推送机（s2）上用 root：给测试中继准备 Launcher 推 Domestic 包要的东西（docs/57）
-                                                     docker 装 docker；images 把包要的镜像从 s2 推过去；launcher-key 放 Launcher 的 SSH 公钥（要 --context）
+  relay <主机> check|docker|images|launcher-key|site|cert   在推送机（s2）上用 root，管测试中继（docs/57、docs/59）
+                                                     site [--admin-allow <IP,...>]：bootstrap 域名的站点（443 转 s2，管理后台只给登记的来源）
+                                                     cert --agree-tos [--email x]：在 s2 上签 Let's Encrypt 证书并推过去，之后每天自动续
+                                                     docker / images / launcher-key：Launcher 推 Domestic 包要的 docker、镜像、SSH 公钥
 
 ${B}写入${O}（必须指名目标）
   node prepare <主机> <阶段> [--context <名字>]      做一个阶段（一次一个）。机器上的阶段要在那台机器上 sudo 运行（docs/35）

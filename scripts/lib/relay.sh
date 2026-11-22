@@ -8,6 +8,7 @@
 # 被 scripts/manage.sh source。
 
 RELAY_BUNDLE_SRC="$ROOT/architecture/mx-launcher/server/scripts/site-slot-artifact-materializer.mjs"
+declare -F note >/dev/null || note() { echo "  ${D}$*${O}"; }
 
 relay_bundle_images() { # Launcher 的 Domestic 包里 docker compose 用的镜像，从生成器里读，换版本时跟着走
   grep -oE "image: [^' ]+" "$RELAY_BUNDLE_SRC" | awk '{print $2}' | sort -u
@@ -52,8 +53,8 @@ relay_check() {
     else bad "$domain 解析到 ${out:-（解析不到）}，不是 $RELAY_IP"; rc=1; fi
   fi
   out="$(relay_ssh "ss -Hlntu 2>/dev/null" 2>/dev/null)"
-  if grep -qE 'tcp .*:443 ' <<<"$out"; then ok "443 有人在听（Launcher 推的 public-tls）"
-  else warn "443 没人在听：Launcher 的 Domestic 包还没推，或者 public-tls 还没起（docs/57）"; fi
+  if grep -qE 'tcp .*:443 ' <<<"$out"; then ok "443 有人在听（bootstrap 站点，docs/59）"
+  else warn "443 没人在听：relay $RELAY_HOST site / cert 还没做（docs/59）"; fi
   if grep -qE 'udp .*:51280 ' <<<"$out"; then ok "UDP 51280 在听（中继 mx-domestic）"
   else warn "UDP 51280 没人在听：中继还没装（docs/57）"; fi
   return $rc
@@ -102,6 +103,156 @@ relay_launcher_key() { # 把 s2 上 Launcher 的 SSH 公钥（管理界面 SSH P
   ok "Launcher 的公钥（站点 $site）已在 $RELAY_HOST 的 authorized_keys 里。回管理界面点 SSH Profile 的检查"
 }
 
+# ---------- bootstrap 域名的 HTTPS（docs/59）----------
+# 证书在 s2 上签、在 s2 上续，放进边缘工具的 state，随 edge push 推过去：和别的边缘配置一样从内往外推。
+# Let's Encrypt 访问 domestic02:80 的挑战路径，domestic02 的 nginx 经边缘隧道转给 s2 上临时监听的 certbot。
+RELAY_ACME_DIR=/var/lib/ladder2/acme
+RELAY_ACME_PORT=18089
+
+relay_state_dir() { echo "${QP_EDGE_HOME:-/var/lib/qp-tunnel/edge}/state/$RELAY_HOST/wg-nginx"; }
+
+relay_site_render() { # 写 nginx/ladder2-bootstrap.conf；证书在 state 里才带 443
+  local state domain link allow_file tls=0 allow_lines="" cidr
+  state="$(relay_state_dir)"
+  [[ -f "$state/wg/relay.conf" ]] || die "没有 $state/wg/relay.conf：这台的边缘隧道不是这台推送机建的（qp-tunnel-cli edge relations）"
+  domain="$(host_field "$RELAY_HOST" bootstrap_domain)"
+  [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || die "inventory 里 $RELAY_HOST 的 bootstrap_domain 不是域名：${domain:-空}"
+  link="$(host_field s2 wg_ip)"; site_is_ipv4 "$link" || die "inventory 里 s2 的 wg_ip（边缘隧道地址）不是地址：$link"
+  allow_file="$state/ladder2-admin-allow"
+  if [[ -f "$allow_file" ]]; then
+    while IFS= read -r cidr; do [[ -n "$cidr" ]] && allow_lines+="    $cidr 1;"$'\n'; done <"$allow_file"
+  fi
+  [[ -f "$state/certs/$domain.crt" && -f "$state/certs/$domain.key" ]] && tls=1
+  install -d -m 700 "$state/nginx"
+  local out="$state/nginx/ladder2-bootstrap.conf" tmp
+  tmp="$(mktemp)"
+  sed -e "s#@DOMAIN@#$domain#g" -e "s#@UPSTREAM@#$link:18090#g" -e "s#@ACME_UPSTREAM@#$link:$RELAY_ACME_PORT#g" \
+    "$ROOT/infra/edge/bootstrap-site.conf.tmpl" | LADDER2_ADMIN_ALLOW="$allow_lines" awk -v tls="$tls" '
+      /^@ADMIN_ALLOW@$/ { printf "%s", ENVIRON["LADDER2_ADMIN_ALLOW"]; next }
+      /^@TLS_BEGIN@$/ { skip = (tls != 1); next }
+      /^@TLS_END@$/ { skip = 0; next }
+      !skip { print }' >"$tmp"
+  install -m 600 "$tmp" "$out"; rm -f "$tmp"
+  RELAY_DOMAIN="$domain"; RELAY_LINK="$link"
+  if (( tls )); then ok "站点 $domain：443（证书在 state 里）+ 80 跳转"
+  else warn "站点 $domain：证书还没签，只有 80（签证书用）。下一步：relay $RELAY_HOST cert --agree-tos"; fi
+  if [[ -n "$allow_lines" ]]; then ok "管理后台只给：$(tr '\n' ' ' <"$allow_file")"
+  else note "管理后台在公网上关着（没有 --admin-allow）。要从公网进后台：relay $RELAY_HOST site --admin-allow <你的公网 IP>/32"; fi
+}
+
+relay_push() {
+  echo "▶ qp-tunnel-cli edge push $RELAY_HOST --stack wg-nginx"
+  if ! qp-tunnel-cli edge push "$RELAY_HOST" --stack wg-nginx --yes; then
+    die "edge push 失败（上面是原因）。如果提示有不是 edge 推的组件（Launcher 推过 Domestic 包），加 --shared-host 再推一次：qp-tunnel-cli edge push $RELAY_HOST --stack wg-nginx --shared-host --yes（docs/57）"
+  fi
+}
+
+relay_site() { # relay <主机> site [--admin-allow <cidr,...>|none] [--no-push]
+  local push=1 a allow="" set_allow=0
+  while (( $# )); do
+    case "$1" in
+      --admin-allow) allow="${2:-}"; set_allow=1; shift 2 ;;
+      --admin-allow=*) allow="${1#*=}"; set_allow=1; shift ;;
+      --no-push) push=0; shift ;;
+      --context|--context=*) [[ "$1" == --context ]] && shift; shift ;;
+      *) die "不认识的参数：$1" ;;
+    esac
+  done
+  local state; state="$(relay_state_dir)"
+  if (( set_allow )); then
+    install -d -m 700 "$state"
+    if [[ "$allow" == none || -z "$allow" ]]; then rm -f "$state/ladder2-admin-allow"; ok "管理后台的公网来源清空了"
+    else
+      local cidr list=()
+      for cidr in ${allow//,/ }; do
+        [[ "$cidr" == */* ]] || cidr="$cidr/32"
+        site_is_ipv4 "${cidr%/*}" && [[ "${cidr#*/}" =~ ^([0-9]|[12][0-9]|3[0-2])$ ]] || die "不是 IPv4 地址或网段：$cidr"
+        [[ "${cidr#*/}" -ge 16 ]] || die "$cidr 太大了：管理后台只放具体的来源（/16 以内）"
+        list+=("$cidr")
+      done
+      printf '%s\n' "${list[@]}" >"$state/ladder2-admin-allow"; chmod 600 "$state/ladder2-admin-allow"
+    fi
+  fi
+  relay_site_render
+  (( push )) && relay_push || true
+}
+
+relay_cert() { # relay <主机> cert --agree-tos [--email <地址>]
+  local agree=0 email="" a
+  while (( $# )); do
+    case "$1" in
+      --agree-tos) agree=1; shift ;;
+      --email) email="${2:-}"; shift 2 ;;
+      --email=*) email="${1#*=}"; shift ;;
+      --context|--context=*) [[ "$1" == --context ]] && shift; shift ;;
+      *) die "不认识的参数：$1" ;;
+    esac
+  done
+  (( agree )) || die "签 Let's Encrypt 的证书要同意它的用户协议（https://letsencrypt.org/repository/）。同意的话加 --agree-tos；--email 可选，用来收到期提醒"
+  relay_site_render
+  relay_push
+  if ! command -v certbot >/dev/null; then
+    echo "▶ s2 上装 certbot"
+    DEBIAN_FRONTEND=noninteractive apt-get ${PROXY:+-o Acquire::http::Proxy="$PROXY" -o Acquire::https::Proxy="$PROXY"} install -y -qq certbot >/dev/null \
+      || die "装 certbot 失败"
+  fi
+  install -d -m 700 "$RELAY_ACME_DIR"
+  local who=(--register-unsafely-without-email); [[ -n "$email" ]] && who=(--email "$email")
+  echo "▶ 给 $RELAY_DOMAIN 签证书：Let's Encrypt → $RELAY_HOST:80 → 边缘隧道 → s2 $RELAY_LINK:$RELAY_ACME_PORT"
+  env ${PROXY:+HTTPS_PROXY="$PROXY" https_proxy="$PROXY"} NO_PROXY="localhost,127.0.0.1,$RELAY_LINK" \
+    certbot certonly --standalone --non-interactive --agree-tos "${who[@]}" \
+      --preferred-challenges http --http-01-address "$RELAY_LINK" --http-01-port "$RELAY_ACME_PORT" \
+      --config-dir "$RELAY_ACME_DIR/config" --work-dir "$RELAY_ACME_DIR/work" --logs-dir "$RELAY_ACME_DIR/logs" \
+      -d "$RELAY_DOMAIN" || die "签证书失败（上面是 certbot 的输出）。先确认 $RELAY_DOMAIN 解析到 $RELAY_IP、阿里云安全组放行 TCP 80（docs/59）"
+  relay_cert_install && relay_site_render && relay_push
+  relay_cert_timer
+  ok "https://$RELAY_DOMAIN 好了。证书每天检查一次，快到期时在 s2 上续、自动推过去（ladder2-acme-renew.timer）"
+}
+
+relay_cert_install() { # 把 certbot 的证书拷进边缘工具的 state；变了才返回 0
+  local live="$RELAY_ACME_DIR/config/live/$RELAY_DOMAIN" certs; certs="$(relay_state_dir)/certs"
+  [[ -f "$live/fullchain.pem" && -f "$live/privkey.pem" ]] || die "没有 $live 下的证书"
+  install -d -m 700 "$certs"
+  if cmp -s "$live/fullchain.pem" "$certs/$RELAY_DOMAIN.crt" && cmp -s "$live/privkey.pem" "$certs/$RELAY_DOMAIN.key"; then
+    note "证书没变"; return 1
+  fi
+  install -m 644 "$live/fullchain.pem" "$certs/$RELAY_DOMAIN.crt"
+  install -m 600 "$live/privkey.pem" "$certs/$RELAY_DOMAIN.key"
+  ok "证书放进了 $certs"
+}
+
+relay_cert_renew() { # 定时器调用：续期，有新证书就推过去
+  relay_site_render >/dev/null
+  env ${PROXY:+HTTPS_PROXY="$PROXY" https_proxy="$PROXY"} NO_PROXY="localhost,127.0.0.1,$RELAY_LINK" \
+    certbot renew --non-interactive --config-dir "$RELAY_ACME_DIR/config" --work-dir "$RELAY_ACME_DIR/work" --logs-dir "$RELAY_ACME_DIR/logs" \
+    || die "certbot renew 失败"
+  if relay_cert_install; then relay_site_render && relay_push; fi
+}
+
+relay_cert_timer() {
+  cat >/etc/systemd/system/ladder2-acme-renew.service <<UNIT
+# de-ladder2（docs/59）。续 $RELAY_DOMAIN 的证书，有新证书就推到 $RELAY_HOST
+[Unit]
+Description=ladder2 renew the bootstrap certificate of $RELAY_HOST
+[Service]
+Type=oneshot
+${PROXY:+Environment=PROXY=$PROXY}
+ExecStart=$ROOT/scripts/manage.sh relay $RELAY_HOST cert-renew
+UNIT
+  cat >/etc/systemd/system/ladder2-acme-renew.timer <<'UNIT'
+# de-ladder2（docs/59）
+[Unit]
+Description=ladder2 renew the bootstrap certificate daily
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload && systemctl enable --now ladder2-acme-renew.timer >/dev/null 2>&1 && ok "定时续期 ladder2-acme-renew.timer 已启用"
+}
+
 cmd_relay() {
   local h="${1:-}" sub="${2:-}"; shift 2 || true
   relay_guard "$h"
@@ -110,6 +261,9 @@ cmd_relay() {
     docker) relay_docker ;;
     images) relay_images ;;
     launcher-key) relay_launcher_key "$@" ;;
-    *) die "用法：relay $h check|docker|images|launcher-key [--context ladder2] [--site=<站点>]（docs/57）" ;;
+    site) relay_site "$@" ;;
+    cert) relay_cert "$@" ;;
+    cert-renew) relay_cert_renew ;;
+    *) die "用法：relay $h check|docker|images|launcher-key|site|cert（docs/57、docs/59）" ;;
   esac
 }

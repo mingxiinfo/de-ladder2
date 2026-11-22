@@ -324,6 +324,12 @@
       "date": "2026-11-22",
       "docs": "58",
       "decisions": "管理界面 Domestic Runtime Config 的站点能输入新站点、改了不丢；新站点默认值按环境设，s2 是 domestic02 / mincave.minsight-ai.com；s2 的库没拷线上配置"
+    },
+    {
+      "round": "第三十一轮",
+      "date": "2026-11-22",
+      "docs": "59",
+      "decisions": "mincave.minsight-ai.com 由 domestic02 的 nginx（边缘工具推）在 443 上服务：客户端接口照 v1 白名单所有人可用，管理后台只给登记的来源 IP；证书在 s2 上用 certbot 经边缘隧道签、每天续、推过去；Launcher 的 Domestic 包不开 public-tls。MinCave 两端的包：L1 导出叠 L2 源码，mac 在 Mac 上、win 在 Windows 上打，先定测试版要不要换身份"
     }
   ]
 }
