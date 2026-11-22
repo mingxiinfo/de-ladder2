@@ -300,6 +300,12 @@
       "date": "2026-11-22",
       "docs": "54",
       "decisions": "domestic02 的公网地址 47.97.46.168 只登记在 inventory，会变：执行前用 LADDER2_DOMESTIC02_PUBLIC_IP 改；Launcher 的 SSH 白名单写占位、部署时现换，任何时候不许出现生产 Domestic 的地址；测试客户端的 .env 用 client-env 生成"
+    },
+    {
+      "round": "第二十七轮",
+      "date": "2026-11-22",
+      "docs": "55",
+      "decisions": "整合成两条命令：init <主机> 第一次按顺序做完准备阶段（runtime 里加 buildkit，镜像直接建进 containerd），deploy <项目> 每次上线（凭据第一次自动生成、镜像按 git 提交定版本、迁移和一次性步骤、验证）；host-nginx 的 404 是 reload 后检查太快"
     }
   ]
 }

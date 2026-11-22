@@ -38,46 +38,30 @@ service peer 是 `10.88.88.88`：Launcher 的 Internal 角色地址，跟着角�
 
 ## 在 s2 上部署
 
-前提是 `docs/35` 的这几个阶段做完了：集群（会给 s2 打 `mx.ladder2/site-peer=true`）、local-path、网关、CloudNativePG（`k8s platform postgres`）、host-nginx。先看一遍：
+两条命令，都在 s2 上用 root、在本工程目录里跑（`docs/55`）。
+
+**第一次：** 装机器、集群、平台组件和构建工具。做过的阶段不会重复改，哪一步失败就停，修好再跑一遍。
 
 ```bash
-sudo ./scripts/manage.sh node verify s2
+PROXY=http://127.0.0.1:7788 ./scripts/manage.sh init s2
 ```
 
-cluster 阶段只把 kubeconfig 写给 root（`/root/.kube/ladder2.conf`）。下面不带 `sudo` 的命令用自己的用户跑，要先拷一份（已经有 `~/.kube/config` 的话不会覆盖，改用 `KUBECONFIG=~/.kube/config:~/.kube/ladder2.conf kubectl config view --flatten` 合并）：
+**每次上线：** 依次做这些，每段计时：
+1. 凭据：第一次自动生成运维令牌，放在 `/var/lib/ladder2/secrets/mx-launcher/`，不进本工程；
+2. 镜像：版本按 git 提交算，本机没有就用 buildkit 构建，直接进 containerd；
+3. 检查；
+4. 一次性步骤：迁移、修复；
+5. apply；
+6. 等滚动完成；
+7. 验证。
+
+数据库表结构的迁移在 Pod 的 initContainer 里，每次都跑，可以重复执行。
 
 ```bash
-mkdir -p ~/.kube && sudo install -m 600 -o "$USER" /root/.kube/ladder2.conf ~/.kube/ladder2.conf && { [ -e ~/.kube/config ] || cp ~/.kube/ladder2.conf ~/.kube/config; }
+PROXY=http://127.0.0.1:7788 ./scripts/manage.sh deploy mx-launcher --context ladder2
 ```
 
-构建镜像，导入节点：
-
-```bash
-PROXY=http://127.0.0.1:7788 ./scripts/manage.sh image build mx-launcher
-sudo ./scripts/manage.sh image import mx-launcher --context ladder2
-```
-
-凭据放推送机本地，不放本工程里：
-
-```bash
-sudo install -d -m 700 /var/lib/ladder2/secrets/mx-launcher/mx-internal-ops
-openssl rand -hex 32 | sudo tee /var/lib/ladder2/secrets/mx-launcher/mx-internal-ops/token >/dev/null
-sudo ./scripts/manage.sh secret apply mx-launcher --from /var/lib/ladder2/secrets/mx-launcher --context ladder2
-```
-
-部署：依次是检查、一次性步骤、apply、等滚动、验证，每段计时：
-
-```bash
-./scripts/manage.sh app deploy mx-launcher --context ladder2
-```
-
-host-nginx 加上 18090 和 H2I 应用入口：
-
-```bash
-sudo PROXY=http://127.0.0.1:7788 ./scripts/manage.sh node prepare s2 host-nginx
-```
-
-然后在管理界面（`http://<s2 LAN>:18090/admin/`）上：
+第一次上线以后，在管理界面（`http://<s2 LAN>:18090/admin/`，用 Internal Ops Token 登录，令牌在上面那个凭据目录里）上：
 - **Foundation → Internal Service Peer → Ensure K8s Fallback**：Launcher 建 host-runner 的 DaemonSet；
 - 同一处 **Install**：host-runner 在 s2 上装 `mx-internal-svc`。s2 用自己新生成的密钥，不用 s1 库里的；
 - **DNS Center → Sync / Apply**：预览、发布分流 DNS 和应用网关的配置。
@@ -88,18 +72,7 @@ sudo PROXY=http://127.0.0.1:7788 ./scripts/manage.sh node prepare s2 host-nginx
 ./scripts/manage.sh app status mx-launcher --context ladder2
 ```
 
-s2 上没有 docker 时，在别的机器上构建好再拷过去：
-
-```bash
-./scripts/manage.sh image build mx-launcher --platform linux/amd64
-./scripts/manage.sh image save mx-launcher --out mx-launcher-l2-2.tar
-```
-
-拷到 s2 以后：
-
-```bash
-sudo ./scripts/manage.sh image import mx-launcher --tar mx-launcher-l2-2.tar --context ladder2
-```
+`init`、`deploy` 背后还是原来的命令（`node prepare`、`image build`、`secret apply`、`app deploy`），要单独做某一步时照旧能用。
 
 ## 改代码之后
 
@@ -111,10 +84,9 @@ sudo ./scripts/manage.sh image import mx-launcher --tar mx-launcher-l2-2.tar --c
    ```
 
    现在有 2 项失败，原因见 `docs/46`"实测"。
-2. 把 `deploy/k8s/overlays/ladder2/kustomization.yaml` 的 `newTag` 加一，`deploy/k8s/base/config.env` 的 `MX_INTERNAL_HOST_RUNNER_IMAGE` 跟着改。两处不一致时 `check` 会报。
-3. 依次 `image build`、`image import`、`app deploy`。
-4. 改了 `config.env` 里的地址或网关参数，或者改了 Launcher 生成配置的函数：跑 `scripts/manage.sh bootstrap-render`。集群里已经有这两个 ConfigMap 的话，部署不会覆盖它们，到界面上点 Apply。
-5. 新加只跑一次的迁移、修复：放 `deploy/once/NNNN-pre-*.sh` 或 `NNNN-post-*.sh`，写法见 `deploy/once/README.md`。
+2. 提交，在 s2 上 `git pull`，再 `deploy`。镜像版本按 git 提交自动算，不用再手改 `newTag`。没提交的改动也能 `deploy`：版本号带 `dirty` 和按改动内容算的哈希。
+3. 改了 `config.env` 里的地址或网关参数，或者改了 Launcher 生成配置的函数：跑 `scripts/manage.sh bootstrap-render`。集群里已经有这两个 ConfigMap 的话，部署不会覆盖它们，到界面上点 Apply。
+4. 新加只跑一次的迁移、修复：放 `deploy/once/NNNN-pre-*.sh` 或 `NNNN-post-*.sh`，写法见 `deploy/once/README.md`。
 
 ## 还没做的
 

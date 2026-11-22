@@ -12,7 +12,7 @@ stage_desc() {
     host)       echo "系统参数：k8s-api 名字、swap、内核模块和参数、时间同步" ;;
     disk)       echo "分卷：/data、/var/lib/etcd 单独的卷（docs/16）" ;;
     nas)        echo "挂 NAS；kubelet 等 NAS 挂好再启动" ;;
-    runtime)    echo "containerd、kubeadm / kubelet / kubectl $K8S_MINOR" ;;
+    runtime)    echo "containerd、kubeadm / kubelet / kubectl $K8S_MINOR、helm、buildkit（构建镜像）" ;;
     cluster)    echo "kubeadm init，context 叫 ladder2" ;;
     network)    echo "flannel、CoreDNS、local-path（默认存储类 local-retain）" ;;
     backup)     echo "etcd 快照和 pki 每天 02:00 写 NAS（先于任何业务）" ;;
@@ -265,6 +265,10 @@ v_runtime() {
   if [[ "$(helm version --short 2>/dev/null)" == "$HELM_VERSION"* ]]; then vok "helm $HELM_VERSION"
   else vbad "helm 不是 $HELM_VERSION（$(helm version --short 2>/dev/null || echo 没装)）"; fi
   [[ -f /etc/systemd/system/containerd.service.d/10-ladder2-proxy.conf ]] && vnote "containerd 拉镜像走代理（10-ladder2-proxy.conf）"
+  local bk; bk="$(buildkitd --version 2>/dev/null | awk '{print $3}')"
+  if [[ "$bk" == "$BUILDKIT_VERSION" ]]; then vok "buildkit $bk"; else vbad "buildkit 不是 $BUILDKIT_VERSION（${bk:-没装}）：deploy 在本机构建镜像要它（docs/55）"; fi
+  if buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers 2>/dev/null | grep -q containerd; then vok "buildkitd 在运行，用 containerd 当后端"
+  else vbad "buildkitd 没在运行或没有 containerd worker：systemctl status ladder2-buildkitd"; fi
   [[ -z "${K8S_VERSION:-}" ]] && vnote "versions.env 的 K8S_VERSION 还空着：补丁版本要和 s1 一致（docs/16）"
   return 0
 }

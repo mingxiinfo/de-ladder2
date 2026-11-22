@@ -72,7 +72,9 @@ app_tmp_init() { # 在主 shell 里调用（不能在 $(...) 里），临时目�
 app_site_overlay() { # app_site_overlay <overlay 目录> → 换好地址的 overlay 目录；没有占位就原样返回
   local ov="$1" k8s rel out f
   k8s="$(cd "$ov/../.." && pwd)"
-  grep -rlE '@[A-Z0-9_]+_(LAN|PUBLIC)_IP@' "$k8s" --include='*.env' >/dev/null 2>&1 || { echo "$ov"; return 0; }
+  if [[ -z "${APP_IMAGE_TAG:-}" ]] && ! grep -rlE '@[A-Z0-9_]+_(LAN|PUBLIC)_IP@' "$k8s" --include='*.env' >/dev/null 2>&1; then
+    echo "$ov"; return 0
+  fi
   [[ -n "$APP_RUN_TMP" ]] || die "内部错误：app_site_overlay 之前要先 app_tmp_init"
   out="$APP_RUN_TMP/$(basename "$(cd "$k8s/../.." && pwd)")-k8s"
   if [[ ! -d "$out" ]]; then
@@ -88,6 +90,19 @@ app_site_overlay() { # app_site_overlay <overlay 目录> → 换好地址的 ove
     done < <(grep -rhE '^[A-Z0-9_]*SSH_ALLOWED_HOSTS=' "$out" --include='*.env')
   fi
   rel="$(cd "$ov" && pwd)"; rel="${rel#"$k8s"/}"
+  # deploy 的镜像版本（docs/55）：overlay 的 newTag 和 *.env 里同一个镜像的写法（例如 host-runner 的镜像）一起换
+  if [[ -n "${APP_IMAGE_TAG:-}" && ! -f "$out/.image-$APP_IMAGE_TAG" ]]; then
+    local name old f2
+    name="$(awk '/^images:/{i=1;next} /^[a-z]/{i=0} i && $1=="newName:"{print $2; exit}' "$out/$rel/kustomization.yaml")"
+    old="$(awk '/^images:/{i=1;next} /^[a-z]/{i=0} i && $1=="newTag:"{print $2; exit}' "$out/$rel/kustomization.yaml")"
+    if [[ -n "$name" && -n "$old" ]]; then
+      sed -i.bak -E "s#^([[:space:]]*newTag:[[:space:]]*).*#\1$APP_IMAGE_TAG#" "$out/$rel/kustomization.yaml" && rm -f "$out/$rel/kustomization.yaml.bak"
+      while IFS= read -r f2; do
+        sed -i.bak "s#$name:$old#$name:$APP_IMAGE_TAG#g" "$f2" && rm -f "$f2.bak"
+      done < <(grep -rlF "$name:$old" "$out" --include='*.env' || true)
+    fi
+    : >"$out/.image-$APP_IMAGE_TAG"
+  fi
   echo "$out/$rel"
 }
 
@@ -120,7 +135,7 @@ app_image_ref() { # app_image_ref <overlay 目录> → newName:newTag（images: 
   name="$(awk '/^images:/{i=1;next} /^[a-z]/{i=0} i && $1=="newName:"{print $2; exit}' "$1/kustomization.yaml")"
   tag="$(awk '/^images:/{i=1;next} /^[a-z]/{i=0} i && $1=="newTag:"{print $2; exit}' "$1/kustomization.yaml")"
   [[ -n "$name" && -n "$tag" ]] || die "$1/kustomization.yaml 的 images: 里没有 newName / newTag"
-  echo "$name:$tag"
+  echo "$name:${APP_IMAGE_TAG:-$tag}"   # deploy 按 git 提交算的版本（docs/55）优先于 overlay 里写的
 }
 
 # 位置参数里去掉 --context 和它的值，剩下的给子命令用
@@ -137,6 +152,36 @@ secrets_list() { # secrets_list <项目目录> → 每行：名字<TAB>键<TAB>�
   [[ -f "$f" ]] || return 0
   awk -F'|' '/^[[:space:]]*#/ || NF < 3 {next}
     { for (i=1;i<=3;i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i) } print $1 "\t" $2 "\t" $3 }' "$f"
+}
+
+secret_gen_spec() { # secret_gen_spec <项目目录> <名字> → 第 5 列，例如"生成 hex32"（docs/55）
+  awk -F'|' -v n="$2" '/^[[:space:]]*#/ {next}
+    { x=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); if (x == n) { g=$5; gsub(/^[[:space:]]+|[[:space:]]+$/, "", g); print g; exit } }' "$1/deploy/secrets.list"
+}
+
+# deploy 的第一步（docs/55）：必需的 Secret 集群里没有时，从推送机的凭据目录建；
+# 目录里也没有、secrets.list 第 5 列写了"生成 hexN"的（随机令牌），就生成一个（openssl rand -hex N），值不显示。
+# 别的必需 Secret（要人给的）缺了就停下，说清楚放哪。
+app_secrets_ensure() { # app_secrets_ensure <项目> <项目目录> <ctx> <ns>
+  local proj="$1" dir="$2" ctx="$3" ns="$4" sdir name keys need gen apply=0
+  [[ -f "$dir/deploy/secrets.list" ]] || { echo "  ${D}项目没有 deploy/secrets.list${O}"; return 0; }
+  sdir="${LADDER2_SECRETS_DIR:-/var/lib/ladder2/secrets}/$proj"
+  while IFS=$'\t' read -r name keys need; do
+    [[ "$need" == 必需 ]] || continue
+    if secret_exists "$ctx" "$ns" "$name"; then ok "Secret $name 在"; continue; fi
+    if [[ -d "$sdir/$name" ]]; then apply=1; continue; fi
+    gen="$(secret_gen_spec "$dir" "$name")"
+    if [[ "$gen" =~ ^生成[[:space:]]+hex([0-9]+)$ && "$keys" != *,* && "$keys" != '*' ]]; then
+      [[ $EUID -eq 0 ]] || die "要生成 Secret $name：凭据目录 $sdir 只给 root，用 sudo 运行"
+      install -d -m 700 "$(dirname "$sdir")" "$sdir" "$sdir/$name"
+      (umask 077; openssl rand -hex "${BASH_REMATCH[1]}" | tr -d '\n' >"$sdir/$name/$keys")
+      echo "  ✎ 生成了 $sdir/$name/$keys（值不显示，只在这台推送机上）"; apply=1
+    else
+      die "缺必需的 Secret $name：把值放到 $sdir/$name/<键>（键：$keys），一个键一个文件，再 deploy（docs/46）"
+    fi
+  done < <(secrets_list "$dir")
+  (( apply )) || return 0
+  cmd_secret apply "$proj" --from "$sdir" --context "$ctx"
 }
 
 secret_exists() { # secret_exists <ctx> <ns> <名字>：0 有，1 没有，2 查不到
@@ -355,6 +400,57 @@ app_deploy() {
   echo "${G}部署完成${O}（共 $((SECONDS - t0)) 秒）"
 }
 
+app_dirty_hash() { # app_dirty_hash <目录> → 8 位：已跟踪文件的改动 + 未跟踪文件的内容（不含 .gitignore 里的）
+  local dir="$1" f sum
+  sum() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi; }
+  {
+    git -C "$ROOT" diff HEAD -- "$dir"
+    git -C "$ROOT" ls-files -o --exclude-standard -- "$dir" | while IFS= read -r f; do
+      printf '%s\n' "$f"; cat "$ROOT/$f" 2>/dev/null
+    done
+  } | sum | cut -c1-8
+}
+
+# deploy <项目> [环境] [--full] --context <名字>：一个命令上线（docs/55）
+#   0a 凭据（第一次自动生成随机令牌）→ 0b 镜像（版本按 git 提交算，本机没有就用 buildkit 构建）→ app deploy 的六段：
+#   检查 → 一次性步骤（迁移、修复）→ apply → 等滚动 → 一次性步骤 → 验证。数据库表结构的迁移在 Pod 的 initContainer 里，每次都跑、可重入
+app_ship() {
+  local args=("$@") pos=() a
+  while IFS= read -r a; do [[ "$a" == --full ]] && continue; pos+=("$a"); done < <(app_positional "$@")
+  local proj="${pos[0]:-}"
+  [[ -n "$proj" ]] || die "用法：deploy <项目> [环境] [--full] --context <名字>（docs/55）"
+  local dir ov ctx ns t0=$SECONDS
+  dir="$(app_dir "$proj")"; ov="$(app_overlay "$proj" "${pos[1]:-}")"; ctx="$(need_context "$@")"; ns="$(app_namespace "$ov")"
+  echo "${B}上线 $proj${O} → 集群 $ctx"
+  echo "${B}0a. 凭据${O}"
+  app_secrets_ensure "$proj" "$dir" "$ctx" "$ns"
+  if [[ -f "$dir/Dockerfile" ]] && app_image_ref "$ov" >/dev/null 2>&1; then
+    echo "${B}0b. 镜像${O}"
+    local sha tag ref t=$SECONDS
+    sha="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null)" || die "不是 git 仓库，算不出镜像版本"
+    tag="l2-$sha"
+    if [[ -n "$(git -C "$ROOT" status --porcelain -- "$dir" 2>/dev/null)" ]]; then
+      # 没提交的改动按内容算一个短哈希：同样的改动再 deploy 不重新构建，改了一个字就是新版本
+      tag="$tag-dirty-$(app_dirty_hash "$dir")"
+      warn "$dir 有没提交的改动：这次的版本是 $tag（按改动内容算的）"
+    fi
+    export APP_IMAGE_TAG="$tag"
+    ref="$(app_image_ref "$ov")"
+    if [[ $EUID -eq 0 ]] && command -v ctr >/dev/null && ctr -n k8s.io images ls -q 2>/dev/null | grep -qxF "$ref"; then
+      ok "本机 containerd 里已有 $ref，不重新构建"
+    elif [[ -S /run/buildkit/buildkitd.sock ]] && command -v buildctl >/dev/null; then
+      image_build_buildkit "$dir" "$ref"
+    elif command -v docker >/dev/null; then
+      cmd_image build "$proj"; cmd_image import "$proj" --context "$ctx"
+    else
+      die "本机没法构建镜像：没有 buildkit（init 的 runtime 阶段会装）也没有 docker。在节点上用 root 运行（docs/55）"
+    fi
+    echo "  ${D}⏱ 镜像：$((SECONDS - t)) 秒${O}"
+  fi
+  app_deploy "${args[@]}"
+  echo "${D}从凭据到验证共 $((SECONDS - t0)) 秒${O}"
+}
+
 app_apply_namespaces() { # 一次性步骤的台账放在命名空间里，pre 步骤之前命名空间要先有
   local dir="$1" ctx="$2"
   [[ -d "$dir/deploy/k8s/platform" ]] && kubectl --context "$ctx" apply -f "$dir/deploy/k8s/platform" >/dev/null
@@ -364,6 +460,10 @@ app_apply_namespaces() { # 一次性步骤的台账放在命名空间里，pre �
 app_deploy_image_check() { # 有自己镜像的项目：节点上有没有 overlay 要的版本（kubelet 上报的镜像列表，不用 root）
   local ov="$1" ctx="$2" ref names
   ref="$(app_image_ref "$ov" 2>/dev/null)" || return 0
+  # 在节点本机：直接问 containerd（刚建好的镜像 kubelet 要过一会儿才上报）
+  if [[ $EUID -eq 0 ]] && command -v ctr >/dev/null && ctr -n k8s.io images ls -q 2>/dev/null | grep -qxF "$ref"; then
+    ok "本机 containerd 里有 $ref"; return 0
+  fi
   names="$(kubectl --context "$ctx" --request-timeout=10s get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.images[*].names}{"\n"}{end}' 2>/dev/null)" \
     || { warn "UNKNOWN：查不到节点上的镜像"; return 0; }
   if grep -qF "$ref" <<<"$names"; then ok "节点上有 $ref（$(grep -F "$ref" <<<"$names" | cut -f1 | tr '\n' ' ')）"
@@ -411,6 +511,30 @@ app_once() { # app once list|run|mark|archive <项目> [步骤] --context <名�
 
 # ---------- image ----------
 
+# 节点本机用 buildkitd 构建（runtime 阶段装的，docs/55）：镜像直接进 containerd 的 k8s.io，kubelet 马上能用，不用 import
+image_build_buildkit() { # image_build_buildkit <项目目录> <镜像> [--platform x]
+  local dir="$1" ref="$2"; shift 2
+  [[ $EUID -eq 0 ]] || die "buildkitd 的 socket 只给 root：sudo ./scripts/manage.sh …"
+  local platform="" i args=()
+  while (( $# )); do case "$1" in --platform) platform="${2:-}"; shift 2 ;; --platform=*) platform="${1#*=}"; shift ;; *) die "不认识的参数：$1" ;; esac; done
+  local rev; rev="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)"
+  [[ -z "$(git -C "$ROOT" status --porcelain -- "$dir" 2>/dev/null)" ]] || rev="$rev-dirty"
+  args=(--addr unix:///run/buildkit/buildkitd.sock build --frontend dockerfile.v0
+        --local context="$dir" --local dockerfile="$dir"
+        --opt "label:dev.qpjoy.ladder2.revision=$rev"
+        --output "type=image,name=$ref,unpack=true")
+  [[ -n "$platform" ]] && args+=(--opt "platform=$platform")
+  [[ -n "${NPM_REGISTRY:-}" ]] && args+=(--opt "build-arg:NPM_REGISTRY=$NPM_REGISTRY")
+  if [[ -n "${PROXY:-}" ]]; then
+    # RUN 用宿主机网络（ladder2-buildkitd 的 --containerd-worker-net=host），连得上 127.0.0.1 上的代理
+    for i in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do args+=(--opt "build-arg:$i=$PROXY"); done
+    args+=(--opt "build-arg:NO_PROXY=localhost,127.0.0.1")
+  fi
+  echo "▶ 用 buildkit 构建 $ref（$dir，修订 $rev），直接进本机 containerd"
+  buildctl "${args[@]}"
+  ok "$ref（已在本机 containerd 的 k8s.io 里，不用 import）"
+}
+
 cmd_image() {
   local sub="${1:-}"; shift || true
   local pos=() a
@@ -421,7 +545,10 @@ cmd_image() {
   case "$sub" in
     build)
       [[ -f "$dir/Dockerfile" ]] || die "$proj 没有 Dockerfile（$dir）"
-      command -v docker >/dev/null || die "image build 要 docker。没有 docker 的机器上：在别的机器 build、save，再拷过来 import --tar"
+      if [[ -S /run/buildkit/buildkitd.sock ]] && command -v buildctl >/dev/null; then
+        image_build_buildkit "$dir" "$ref" "${pos[@]:1}"; return
+      fi
+      command -v docker >/dev/null || die "image build 要 buildkit（runtime 阶段装，docs/55）或 docker。都没有的机器上：在别的机器 build、save，再拷过来 import --tar"
       local platform="" i
       for ((i=1; i<${#pos[@]}; i++)); do
         case "${pos[$i]}" in --platform) platform="${pos[$((i+1))]:-}"; i=$((i+1)) ;; --platform=*) platform="${pos[$i]#*=}" ;; *) die "不认识的参数：${pos[$i]}" ;; esac

@@ -15,6 +15,8 @@
 
 ## 还没做的
 
+- buildkit（`versions.env` 的 `BUILDKIT_VERSION`，runtime 阶段装）没在 s2 上跑过：版本号按记得的写的，`--containerd-worker-net=host` 和建好的镜像能不能被 kubelet 直接用都没实测（`docs/55`）。
+
 `./scripts/manage.sh check` 只证明清单能渲染。下面这些没在集群上跑过，或者还没写：
 
 - 所有清单和 `install.sh` 在真实集群上的行为。s2 上按 `docs/35` 的阶段第一次跑时逐个核对。

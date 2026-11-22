@@ -53,6 +53,12 @@ ${B}只读${O}
   probe wg                  本机 WireGuard 各对端的最近握手时间
   loadtest results          每条链路每一层最近一次压测的结果
 
+${B}两条常用的${O}（docs/55）
+  init <主机>                                        在那台机器上用 root：按顺序做完装机、运行时（含构建工具）、集群、网络、网关、数据库组件、host-nginx。
+                                                     做过的不重复改，失败就停，修好再跑一遍。nas、backup 暂缓（docs/51），disk 手工
+  deploy <项目> [环境] [--full] --context <名字>      每次上线一条命令：凭据（第一次自动生成）→ 镜像（按 git 提交定版本，本机构建）
+                                                     → 检查 → 迁移和一次性步骤 → apply → 等滚动 → 验证。在节点上用 root 运行
+
 ${B}写入${O}（必须指名目标）
   node prepare <主机> <阶段> [--context <名字>]      做一个阶段（一次一个）。机器上的阶段要在那台机器上 sudo 运行（docs/35）
   k8s platform <组件> --context <名字>               往指定集群装平台组件：flannel、local-path、metrics-server、gateway、postgres
@@ -303,7 +309,8 @@ need_context() { # 从参数里取 --context。写操作必须指名集群，不
   echo "$ctx"
 }
 
-confirm() { # confirm <提示>；非交互时拒绝
+confirm() { # confirm <提示>；非交互时拒绝。init 开头已经确认过一次的，后面各阶段不再问（docs/55）
+  [[ "${LADDER2_CONFIRMED:-}" == 1 ]] && { echo "  ${D}$1（init 开头已确认）${O}"; return 0; }
   [[ -t 0 ]] || die "需要人工确认，不能在非交互环境执行。"
   local a; read -r -p "$1 输入 yes 继续：" a; [[ "$a" == yes ]] || die "已取消。"
 }
@@ -359,6 +366,41 @@ cmd_run() {
 
 host_field() { # host_field <主机> <字段>；lan_ip 可以被 LADDER2_<主机>_LAN_IP 覆盖（scripts/lib/site.sh，docs/50）
   site_host_field "$INV_HOSTS" "$1" "$2" || die "主机 $1 的 $2 不对（见上一行）"
+}
+
+# init <主机>（docs/55）：在那台机器上按顺序做完准备阶段，到能 deploy 为止。每个阶段本来就可以重复执行、
+# 已经是目标状态就不动，所以失败了修好再跑一遍 init 就行。开头确认一次（装平台组件要确认，CLAUDE.md），后面不再问。
+INIT_STAGES=(host runtime cluster network metrics gateway postgres host-nginx)
+cmd_init() {
+  local h="${1:-}"; shift || true
+  [[ -n "$h" ]] || die "用法：sudo ./scripts/manage.sh init <主机>，例如 init s2（docs/55）"
+  stage_check_host "$h"
+  is_s1_here && die "这台是 s1。不在 s1 上做任何准备（CLAUDE.md 硬约束）。"
+  local lan; lan="$(host_field "$h" lan_ip)"
+  local_ips | grep -qx "$lan" || die "init 要在 $h 本机上执行（本机没有地址 $lan，来自 $(site_lan_source "$h")）"
+  [[ $EUID -eq 0 ]] || die "init 要 root：sudo ./scripts/manage.sh init $h（PROXY 写在 sudo 后面）"
+  echo "${B}init $h${O}（地址 $lan）。按顺序做："
+  local s i=0
+  for s in "${INIT_STAGES[@]}"; do i=$((i+1)); printf "  %d. %-11s %s\n" "$i" "$s" "$(stage_desc "$s")"; done
+  echo "  ${D}不在里面：disk（手工分卷，docs/35）、nas 和 backup（暂缓，docs/51）、sample / loadtest / edge（不挡上线）${O}"
+  [[ -n "${PROXY:-}" ]] || warn "没有设 PROXY：国内下载 kubeadm、镜像、helm、buildkit 多半会失败。一般写成 PROXY=http://127.0.0.1:7788"
+  [[ -f /etc/kubernetes/admin.conf ]] || warn "集群建好以后 $h 的地址 $lan 就不能再变（写进证书和 etcd，docs/50）。先在路由器上固定它"
+  confirm "会往这台机器装集群和平台组件。"
+  export LADDER2_CONFIRMED=1
+  local t0=$SECONDS t args
+  i=0
+  for s in "${INIT_STAGES[@]}"; do
+    i=$((i+1)); t=$SECONDS
+    echo; echo "${B}━━ [$i/${#INIT_STAGES[@]}] $s${O}"
+    args=("$h" "$s"); [[ "$(stage_kind "$s")" == cluster ]] && args+=(--context ladder2)
+    if ! ( stage_prepare "${args[@]}" ); then
+      die "阶段 $s 没做完（上面是原因）。修好以后再跑一遍：sudo PROXY=\${PROXY:-…} ./scripts/manage.sh init $h，做过的阶段不会重复改"
+    fi
+    echo "  ${D}⏱ $s：$((SECONDS - t)) 秒${O}"
+  done
+  echo
+  echo "${G}init $h 完成${O}（共 $((SECONDS - t0)) 秒）。核对：./scripts/manage.sh node verify $h"
+  echo "上线 Launcher：sudo PROXY=${PROXY:-http://127.0.0.1:7788} ./scripts/manage.sh deploy mx-launcher --context ladder2"
 }
 
 cmd_node() {
@@ -825,6 +867,8 @@ main() {
     k8s) cmd_k8s "$@" ;;
     l1) cmd_l1 "$@" ;;
     run) cmd_run "$@" ;;
+    init) cmd_init "$@" ;;
+    deploy) app_tmp_init; app_ship "$@" ;;
     app) cmd_app "$@" ;;
     image) cmd_image "$@" ;;
     secret) cmd_secret "$@" ;;

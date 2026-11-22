@@ -49,6 +49,12 @@ if systemctl is-active -q nginx; then
 else
   systemctl start nginx
 fi
-code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$LAN_IP/gateway-health" || true)"
-[[ "$code" == 200 ]] || die "http://$LAN_IP/gateway-health 返回 $code"
+# reload 是异步的：旧的 worker 还会用旧配置（Ubuntu 默认站点，返回 404）答一会儿，所以最多等 10 秒
+code=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$LAN_IP/gateway-health" || true)"
+  [[ "$code" == 200 ]] && break
+  sleep 1
+done
+[[ "$code" == 200 ]] || die "http://$LAN_IP/gateway-health 等了 10 秒还是返回 $code。看 nginx -T | grep -n default_server，是不是还有别的站点占着 80 的 default_server"
 done_ "http://$LAN_IP/gateway-health 200"

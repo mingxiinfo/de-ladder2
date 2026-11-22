@@ -90,3 +90,49 @@ fi
 systemctl enable --now containerd >/dev/null 2>&1
 systemctl enable kubelet >/dev/null 2>&1
 done_ "containerd 在运行；kubelet 已设为开机启动（建集群之后才会正常运行）"
+
+say "buildkit $BUILDKIT_VERSION（deploy 在本机构建镜像用，docs/55）"
+# buildkitd 用 containerd 当后端，镜像直接进 k8s.io 命名空间，kubelet 马上能用：不用 docker，不用镜像仓库，也不用 import。
+# 它自己的代理只写在自己的 unit 里，不动 containerd 和别的服务。
+if [[ "$(buildkitd --version 2>/dev/null | awk '{print $3}')" == "$BUILDKIT_VERSION" ]]; then
+  note "已装"
+else
+  arch="$(dpkg --print-architecture)"; tgz="buildkit-$BUILDKIT_VERSION.linux-$arch.tar.gz"; d="$(mktemp -d)"
+  dl -o "$d/$tgz" "https://github.com/moby/buildkit/releases/download/$BUILDKIT_VERSION/$tgz"
+  tar -C "$d" -xzf "$d/$tgz"
+  install -m 0755 "$d/bin/buildkitd" /usr/local/bin/buildkitd
+  install -m 0755 "$d/bin/buildctl" /usr/local/bin/buildctl
+  rm -rf "$d"
+  echo "  ✎ /usr/local/bin/buildkitd、buildctl"
+  CHANGED_BK=1
+fi
+proxy_env=""
+[[ -n "${PROXY:-}" ]] && proxy_env="Environment=\"HTTP_PROXY=$PROXY\" \"HTTPS_PROXY=$PROXY\" \"NO_PROXY=$NO_PROXY_LIST\""
+CHANGED=0
+write_file /etc/systemd/system/ladder2-buildkitd.service <<UNIT
+# de-ladder2（docs/55）。镜像建进 containerd 的 k8s.io；RUN 用宿主机网络，才连得上 127.0.0.1 上的代理。
+[Unit]
+Description=ladder2 buildkitd (containerd worker, namespace k8s.io)
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+$proxy_env
+ExecStart=/usr/local/bin/buildkitd --addr unix:///run/buildkit/buildkitd.sock --oci-worker=false --containerd-worker=true --containerd-worker-addr=/run/containerd/containerd.sock --containerd-worker-namespace=k8s.io --containerd-worker-net=host
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+if (( CHANGED )) || [[ -n "${CHANGED_BK:-}" ]]; then
+  systemctl daemon-reload
+  systemctl enable ladder2-buildkitd >/dev/null 2>&1
+  systemctl restart ladder2-buildkitd
+  echo "  ↻ ladder2-buildkitd 已重启"
+else
+  systemctl enable --now ladder2-buildkitd >/dev/null 2>&1
+fi
+for _ in 1 2 3 4 5 6 7 8 9 10; do buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1 && break; sleep 1; done
+buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers 2>/dev/null | grep -q containerd \
+  || die "buildkitd 没起来或者没有 containerd worker：journalctl -u ladder2-buildkitd -n 50"
+done_ "buildkitd 在运行，镜像建进 containerd 的 k8s.io"
