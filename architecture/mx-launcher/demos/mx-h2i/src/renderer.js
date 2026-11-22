@@ -1,0 +1,5242 @@
+const electronApi = window.mxH2i || null;
+const mincaveUi = document.documentElement.dataset.ui === 'mincave';
+// The production shell must never turn a missing preload into a demo session.
+const api = electronApi || (mincaveUi ? {
+  platform: 'browser',
+  getState: async () => { throw new Error('请在 MinCave 桌面客户端中打开此界面。'); }
+} : createMockApi());
+const root = document.getElementById('app');
+const renderReleaseNotesMarkdown = window.MxReleaseNotesMarkdown?.renderReleaseNotesMarkdown
+  || ((value) => `<p>${escapeHtml(value)}</p>`);
+const isWindows = api.platform === 'win32';
+document.documentElement.dataset.platform = api.platform || 'browser';
+const H2O_DEFAULT_TEST_URL = 'https://www.google.com';
+const ANONYMOUS_LOGIN_DISABLED_MESSAGE = 'MX-H2I 已禁止匿名登录，请使用员工登录或由管理员重新启用';
+const H2O_TEST_PRESETS = [
+  { id: 'google', label: 'Google', url: H2O_DEFAULT_TEST_URL },
+  { id: 'youtube', label: 'YouTube', url: 'https://www.youtube.com' },
+  { id: 'x', label: 'X / Twitter', url: 'https://x.com' },
+  { id: 'telegram', label: 'Telegram', url: 'https://web.telegram.org' }
+];
+const H2O_RULE_PACKS = [
+  {
+    id: 'google',
+    label: 'Google',
+    kind: 'allow',
+    hosts: ['google.com', 'gstatic.com', 'googleapis.com', 'googleusercontent.com', 'ggpht.com', 'google-analytics.com', 'doubleclick.net']
+  },
+  {
+    id: 'youtube',
+    label: 'YouTube',
+    kind: 'allow',
+    hosts: ['youtube.com', 'youtu.be', 'youtube-nocookie.com', 'googlevideo.com', 'ytimg.com', 'youtubei.googleapis.com', 'youtube.googleapis.com', 'ggpht.com']
+  },
+  {
+    id: 'x',
+    label: 'X / Twitter',
+    kind: 'allow',
+    hosts: ['x.com', 'twitter.com', 't.co', 'twimg.com', 'abs.twimg.com', 'pbs.twimg.com', 'video.twimg.com']
+  },
+  {
+    id: 'telegram',
+    label: 'Telegram',
+    kind: 'allow',
+    hosts: ['telegram.org', 't.me', 'telegram.me', 'telegra.ph', 'web.telegram.org', 'tdesktop.com']
+  }
+];
+
+let state = null;
+let busyAction = '';
+let busyActionRunId = 0;
+let actionRunSequence = 0;
+let cancelNetworkOperationInFlight = false;
+let screen = 'launcher';
+let modeDraft = 'employee';
+let windowDrag = null;
+let windowDragSequence = 0;
+let appSearch = '';
+let appCategory = 'all';
+let selectedAppId = 'h2o';
+let appCenterRoute = 'catalog';
+let h2oManagerView = 'overview';
+let appDebugOpen = false;
+let foundationOpen = false;
+let appShellMenuOpen = false;
+let phoneMenuOpen = false;
+let appInspectorCollapsed = false;
+let appGridScrollTop = 0;
+const phoneScrollTops = new Map();
+let h2oTestUrlDraft = H2O_DEFAULT_TEST_URL;
+let h2oSubscriptionEditId = '';
+let h2oSubscriptionDraft = defaultH2oSubscriptionDraft();
+const EMPLOYEE_ACCOUNT_HISTORY_KEY = 'mx-h2i.employeeAccountHistory';
+const EMPLOYEE_ACCOUNT_HISTORY_LIMIT = 10;
+let employeeLoginDraft = { account: '', password: '' };
+let employeeAccountHistory = readEmployeeAccountHistory();
+let dismissedReleasePromptKey = '';
+let mincaveSnapshot = null;
+const mincaveListeners = new Set();
+
+// Keep the existing command dispatcher and its cancellation epochs authoritative.
+// React consumes this projection; compatibility forms still use the delegated
+// handlers below, so login/network/H2O behavior does not fork during migration.
+window.MxH2iView = Object.freeze({
+  getSnapshot: () => mincaveSnapshot,
+  subscribe: (listener) => {
+    mincaveListeners.add(listener);
+    return () => mincaveListeners.delete(listener);
+  },
+  navigate: (target) => {
+    screen = target === 'advanced' ? 'advanced' : target === 'h2o' || target === 'apps' ? 'appcenter' : 'launcher';
+    if (target === 'h2o') { selectedAppId = 'h2o'; appCenterRoute = 'h2o'; }
+    else if (target === 'apps') appCenterRoute = 'catalog';
+    phoneMenuOpen = false;
+    appShellMenuOpen = false;
+    render();
+  },
+  dismissRelease: () => {
+    dismissedReleasePromptKey = releasePromptKey(state?.update);
+    render();
+  },
+  devices: async () => {
+    try { return await api.mincaveDevices(); }
+    catch { return { ok: false, error: { code: 'unavailable', message: '暂时无法获取设备，请稍后重试。' } }; }
+  },
+  admin: async (input) => {
+    if (!api.mincaveAdmin) return { ok: false, error: { code: 'unavailable', message: '管理服务暂不可用。' } };
+    try { return await api.mincaveAdmin(input); }
+    catch { return { ok: false, error: { code: 'unavailable', message: '管理服务暂不可用。' } }; }
+  }
+});
+
+void boot().catch((error) => {
+  if (!mincaveUi) throw error;
+  mincaveSnapshot = { error: error?.message || '无法读取客户端状态，请重试。' };
+  for (const listener of mincaveListeners) listener();
+});
+
+async function boot() {
+  let observedState = false;
+  if (typeof api.onState === 'function') {
+    const unsubscribe = api.onState((next) => {
+      observedState = true;
+      state = next;
+      if (state.connection?.state === 'idle') modeDraft = 'employee';
+      else if (state.connection?.mode === 'guest' && modeDraft !== 'employee') modeDraft = preferredLauncherMode();
+      syncEmployeeLoginDraftFromState();
+      render();
+    });
+    window.addEventListener('beforeunload', () => unsubscribe?.(), { once: true });
+  }
+  // A broadcast can arrive while getState is pending. Its newer snapshot wins.
+  try {
+    const initial = await api.getState();
+    if (!observedState) state = initial;
+  } catch (error) {
+    if (!state) throw error;
+  }
+  if (isWindows && !mincaveUi) await api.setWindowMode?.('launcher');
+  modeDraft = preferredLauncherMode();
+  syncEmployeeLoginDraftFromState();
+  render();
+}
+
+root.addEventListener('click', (event) => {
+  const control = event.target.closest('[data-window-control]');
+  if (control) {
+    void api.windowControl?.(control.dataset.windowControl);
+    return;
+  }
+  const button = event.target.closest('[data-action]');
+  if (!button) return;
+  const action = button.dataset.action;
+  if (action === 'dismiss-release-update') {
+    dismissedReleasePromptKey = releasePromptKey(state.update);
+    render();
+    return;
+  }
+  if (action === 'accept-release-update') {
+    dismissedReleasePromptKey = releasePromptKey(state.update);
+    render();
+    void runAction('applyUpdate');
+    return;
+  }
+  if (action === 'checkUpdates') dismissedReleasePromptKey = '';
+  rememberAppGridScroll();
+  if (button.dataset.appId && action !== 'select-app') {
+    selectedAppId = button.dataset.appId;
+  }
+  if (action === 'phone-back') {
+    handlePhoneBack();
+    return;
+  }
+  if (action === 'toggle-phone-menu') {
+    phoneMenuOpen = !phoneMenuOpen;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'switch-phone-shell') {
+    phoneMenuOpen = false;
+    const target = button.dataset.target || 'h2i';
+    if (target === 'appcenter') {
+      if (state.apps?.appcenter?.installed) {
+        void setScreen('appcenter');
+      } else {
+        void runAction('installAppCenter');
+      }
+      return;
+    }
+    if (target === 'close') {
+      void api.windowControl?.('close');
+      return;
+    }
+    void setScreen('launcher');
+    return;
+  }
+  if (action === 'select-mode') {
+    phoneMenuOpen = false;
+    modeDraft = button.dataset.mode === 'employee' ? 'employee' : 'guest';
+    render();
+    return;
+  }
+  if (action === 'show-launcher') {
+    phoneMenuOpen = false;
+    appShellMenuOpen = false;
+    void setScreen('launcher');
+    return;
+  }
+  if (action === 'show-advanced') {
+    phoneMenuOpen = false;
+    appShellMenuOpen = false;
+    void setScreen('advanced');
+    return;
+  }
+  if (action === 'copy-install-id') {
+    phoneMenuOpen = false;
+    void copyInstallationId();
+    return;
+  }
+  if (action === 'show-appcenter') {
+    phoneMenuOpen = false;
+    appShellMenuOpen = false;
+    if (state.apps?.appcenter?.installed) {
+      void setScreen('appcenter');
+    } else {
+      void runAction('installAppCenter');
+    }
+    return;
+  }
+  if (action === 'select-app') {
+    phoneMenuOpen = false;
+    appCenterRoute = 'catalog';
+    appInspectorCollapsed = false;
+    selectedAppId = button.dataset.appId || selectedAppId;
+    render();
+    return;
+  }
+  if (action === 'show-app-catalog') {
+    appCenterRoute = 'catalog';
+    appInspectorCollapsed = false;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'showH2oManager') {
+    selectedAppId = 'h2o';
+    appCenterRoute = 'h2o';
+    appInspectorCollapsed = true;
+    appShellMenuOpen = false;
+    if (mincaveUi) screen = 'appcenter';
+    render();
+    if (mincaveUi && isInternalConnected() && isUserIdentity() && !h2oRuntime().clashLink?.url) {
+      void runAction('refreshH2oSubscription', { subscriptionId: 'h2o-default' });
+    }
+    return;
+  }
+  if (action === 'set-h2o-view') {
+    h2oManagerView = button.dataset.view || 'overview';
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'toggle-foundation-panel') {
+    foundationOpen = !foundationOpen;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'toggle-app-shell-menu') {
+    appShellMenuOpen = !appShellMenuOpen;
+    render();
+    return;
+  }
+  if (action === 'switch-app-shell') {
+    appShellMenuOpen = false;
+    const target = button.dataset.target || 'appcenter';
+    if (target === 'h2i') {
+      void setScreen('launcher');
+      return;
+    }
+    if (target === 'appcenter') {
+      void setScreen('appcenter');
+      return;
+    }
+    if (target === 'close') {
+      void setScreen('launcher');
+      return;
+    }
+  }
+  if (action === 'set-app-category') {
+    appCategory = button.dataset.category || 'all';
+    appCenterRoute = 'catalog';
+    appInspectorCollapsed = false;
+    appGridScrollTop = 0;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'toggle-app-debug') {
+    appDebugOpen = !appDebugOpen;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'toggle-app-inspector') {
+    appInspectorCollapsed = !appInspectorCollapsed;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'selectH2oNode') {
+    const name = button.dataset.node || '';
+    if (name) void runAction('selectH2oNode', name);
+    return;
+  }
+  if (action === 'setH2oTuning') {
+    const runtime = h2oRuntime();
+    const field = button.dataset.tuningField || '';
+    const raw = button.dataset.tuningValue || '';
+    if (!['dnsMode', 'tunStack', 'cnDirect', 'strictRoute'].includes(field)) return;
+    const value = ['cnDirect', 'strictRoute'].includes(field) ? raw === 'on' : raw;
+    const tuning = { ...h2oTuning(runtime), [field]: value };
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      tuning,
+      // 运行中才需要重渲染 mihomo config；停止状态下留到下次启动生效。
+      applyTunnelRuntime: runtime.running === true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O ${field} set to ${String(value)}.`
+    });
+    return;
+  }
+  if (action === 'setH2oMode') {
+    const runtime = h2oRuntime();
+    const nextMode = normalizeH2oModeUi(button.dataset.mode || 'app-global');
+    appShellMenuOpen = false;
+    if (!h2oHasUsableSubscription(runtime)) {
+      h2oManagerView = 'subscriptions';
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        status: 'subscription-required',
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: 'H2O mode change blocked: no usable oversea subscription for current user.'
+      });
+      return;
+    }
+    if (h2oModeNeedsTun(nextMode) && !runtime.tunInstalled) {
+      h2oManagerView = 'proxy';
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        status: 'tun-required',
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: 'H2O system TUN mode requires TUN helper installation first.'
+      });
+      return;
+    }
+    void runAction('setH2oMode', nextMode);
+    return;
+  }
+  if (action === 'installH2oTun' || action === 'uninstallH2oTun') {
+    const runtime = h2oRuntime();
+    const tunInstalled = action === 'installH2oTun';
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      tunInstalled,
+      mode: !tunInstalled && h2oModeNeedsTun(runtime.mode) ? 'app-global' : runtime.mode,
+      status: runtime.running ? 'running' : 'ready',
+      applyTunnelRuntime: true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: tunInstalled ? 'H2O TUN helper installed by AppCenter.' : 'H2O TUN helper removed by AppCenter.'
+    });
+    return;
+  }
+  if (action === 'saveH2oPorts') {
+    const runtime = h2oRuntime();
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      ports: { ...runtime.ports, ...readH2oPortFields() },
+      applyTunnelRuntime: true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: 'H2O ports saved from AppCenter.'
+    });
+    return;
+  }
+  if (action === 'setH2oSubscription') {
+    const runtime = h2oRuntime();
+    const subscriptionId = button.dataset.subscriptionId || runtime.activeSubscription.id;
+    const activeSubscription = runtime.subscriptions.find((item) => item.id === subscriptionId) || runtime.activeSubscription;
+    if (!h2oSubscriptionUsable(activeSubscription)) {
+      h2oManagerView = 'subscriptions';
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        status: 'subscription-required',
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: `H2O subscription is not usable for current identity: ${activeSubscription.name}.`
+      });
+      return;
+    }
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      activeSubscription,
+      activeSubscriptionId: activeSubscription.id,
+      applyTunnelRuntime: true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O active subscription switched to ${activeSubscription.name}.`
+    });
+    return;
+  }
+  if (action === 'pinH2oSubscription') {
+    const runtime = h2oRuntime();
+    const subscriptionId = button.dataset.subscriptionId || runtime.activeSubscription.id;
+    const target = runtime.subscriptions.find((item) => item.id === subscriptionId);
+    if (!target) return;
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      subscriptions: pinH2oSubscription(runtime.subscriptions, subscriptionId),
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O subscription pinned: ${target.name}.`
+    });
+    return;
+  }
+  if (action === 'editH2oSubscription') {
+    const runtime = h2oRuntime();
+    const subscriptionId = button.dataset.subscriptionId || '';
+    const target = runtime.subscriptions.find((item) => item.id === subscriptionId);
+    if (!target || target.source !== 'custom') return;
+    h2oSubscriptionEditId = target.id;
+    h2oSubscriptionDraft = h2oSubscriptionDraftFromItem(target);
+    render();
+    return;
+  }
+  if (action === 'cancelH2oSubscriptionEdit') {
+    resetH2oSubscriptionDraft();
+    render();
+    return;
+  }
+  if (action === 'deleteH2oSubscription') {
+    const runtime = h2oRuntime();
+    const subscriptionId = button.dataset.subscriptionId || '';
+    const target = runtime.subscriptions.find((item) => item.id === subscriptionId);
+    if (!h2oSubscriptionCanDelete(target)) return;
+    const nextSubscriptions = runtime.subscriptions.filter((item) => item.id !== subscriptionId);
+    const activeSubscription = runtime.activeSubscription.id === subscriptionId
+      ? nextSubscriptions.find((item) => h2oSubscriptionUsable(item)) || nextSubscriptions[0] || runtime.activeSubscription
+      : runtime.activeSubscription;
+    if (h2oSubscriptionEditId === subscriptionId) resetH2oSubscriptionDraft();
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      subscriptions: nextSubscriptions,
+      activeSubscription,
+      activeSubscriptionId: activeSubscription.id,
+      status: h2oSubscriptionUsable(activeSubscription) ? (runtime.running ? 'running' : 'ready') : 'subscription-required',
+      applyTunnelRuntime: true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O subscription deleted: ${target.name}.`
+    });
+    return;
+  }
+  if (action === 'issueH2oClashLink') {
+    // 轮换会立即作废已经配进 Clash 的那条，别让它变成一次误点。
+    const existing = h2oRuntime().clashLink;
+    if (existing && !window.confirm('重新生成 Clash 订阅链接？\n\n当前链接会立即失效，已经配置过的 Clash 需要重新粘贴。')) return;
+    void runAction('issueH2oClashLink', {});
+    return;
+  }
+  if (action === 'copyH2oClashLink') {
+    const url = h2oRuntime().clashLink?.url || '';
+    if (url) void copyH2oClashLink(url);
+    return;
+  }
+  if (action === 'refreshH2oSubscription') {
+    const runtime = h2oRuntime();
+    const subscriptionId = button.dataset.subscriptionId || runtime.activeSubscription.id;
+    const current = runtime.subscriptions.find((item) => item.id === subscriptionId) || runtime.activeSubscription;
+    if (current.requiresUser && !isUserIdentity()) {
+      h2oManagerView = 'subscriptions';
+      const subscriptions = runtime.subscriptions.map((item) => item.id === subscriptionId
+        ? { ...item, status: 'login-required', lastUpdatedAt: new Date().toISOString() }
+        : item);
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        subscriptions,
+        activeSubscription: subscriptions.find((item) => item.id === runtime.activeSubscription.id) || runtime.activeSubscription,
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: `H2O subscription refresh requires logged-in user: ${current.name}.`
+      });
+      return;
+    }
+    void runAction('refreshH2oSubscription', { subscriptionId });
+    return;
+  }
+  if (action === 'toggleH2oRule') {
+    const runtime = h2oRuntime();
+    const ruleId = button.dataset.ruleId || '';
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      rules: runtime.rules.map((rule) => rule.id === ruleId ? { ...rule, enabled: rule.enabled === false } : rule),
+      applyTunnelRuntime: true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O rule toggled: ${ruleId}.`
+    });
+    return;
+  }
+  if (action === 'addH2oRulePack' || action === 'removeH2oRulePack') {
+    const runtime = h2oRuntime();
+    const pack = h2oRulePack(button.dataset.rulePack);
+    const adding = action === 'addH2oRulePack';
+    const rules = adding
+      ? addH2oRulePack(runtime.rules, pack)
+      : removeH2oRulePack(runtime.rules, pack);
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      rules,
+      applyTunnelRuntime: true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: adding ? `H2O rule pack added: ${pack.label}.` : `H2O rule pack removed: ${pack.label}.`
+    });
+    return;
+  }
+  if (action === 'requestH2oProxy') {
+    const runtime = h2oRuntime();
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      metrics: {
+        ...runtime.metrics,
+        connections: runtime.running ? runtime.metrics.connections + 1 : runtime.metrics.connections,
+        lastProxyAppliedAt: new Date().toISOString()
+      },
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O broker policy applied in ${h2oModeLabel(runtime.mode)}.`
+    });
+    return;
+  }
+  if (action === 'runH2oTest') {
+    const targetUrl = button.dataset.testUrl || readH2oTestUrl();
+    setH2oTestUrl(targetUrl);
+    void runAction('openH2oTestWindow', { url: targetUrl });
+    return;
+  }
+  if (action === 'openRollback') {
+    appShellMenuOpen = false;
+    phoneMenuOpen = false;
+    void runAction('openRollback', button.dataset.rollbackId || '');
+    return;
+  }
+  if (action === 'installRelease') {
+    appShellMenuOpen = false;
+    phoneMenuOpen = false;
+    void runAction('installRelease', button.dataset.releaseId || '');
+    return;
+  }
+  if (action === 'cancelNetworkOperation') {
+    appShellMenuOpen = false;
+    phoneMenuOpen = false;
+    void runAction(action, { id: button.dataset.operationId || null });
+    return;
+  }
+  if (action === 'connectGuest') {
+    modeDraft = 'guest';
+  }
+  appShellMenuOpen = false;
+  phoneMenuOpen = false;
+  void runAction(action);
+});
+
+root.addEventListener('input', (event) => {
+  const employeeField = event.target.closest('[data-employee-login-field]');
+  if (employeeField) {
+    const key = employeeField.dataset.employeeLoginField === 'password' ? 'password' : 'account';
+    employeeLoginDraft = {
+      ...employeeLoginDraft,
+      [key]: employeeField.value || ''
+    };
+    return;
+  }
+  const input = event.target.closest('[data-app-search]');
+  if (input) {
+    appSearch = input.value || '';
+    appGridScrollTop = 0;
+    render();
+    return;
+  }
+  const testUrlInput = event.target.closest('[data-h2o-test-url]');
+  if (testUrlInput) {
+    h2oTestUrlDraft = testUrlInput.value || '';
+    return;
+  }
+  const subscriptionForm = event.target.closest('.h2o-subscription-form');
+  if (subscriptionForm) {
+    h2oSubscriptionDraft = readH2oSubscriptionForm(subscriptionForm);
+  }
+});
+
+root.addEventListener('change', (event) => {
+  const subscriptionForm = event.target.closest('.h2o-subscription-form');
+  if (subscriptionForm) {
+    h2oSubscriptionDraft = readH2oSubscriptionForm(subscriptionForm);
+  }
+});
+
+root.addEventListener('scroll', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.classList.contains('appcenter-card-grid')) {
+    appGridScrollTop = target.scrollTop;
+  }
+}, true);
+
+root.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const target = event.target instanceof Element ? event.target : null;
+  const card = target?.closest('.appcenter-app-card[data-action="select-app"]');
+  if (!card || target.closest('button,input,select,a')) return;
+  event.preventDefault();
+  card.click();
+});
+
+root.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const action = form.dataset.formAction;
+  if (action === 'save-config') {
+    void runAction(action, readConfigForm(form));
+  }
+  if (action === 'login-employee') {
+    const payload = Object.fromEntries(new FormData(form).entries());
+    employeeLoginDraft = {
+      account: String(payload.account || ''),
+      password: String(payload.password || '')
+    };
+    rememberEmployeeAccount(employeeLoginDraft.account);
+    void runAction(action, { ...employeeLoginDraft });
+  }
+  if (action === 'add-h2o-rule') {
+    const runtime = h2oRuntime();
+    const rule = h2oRuleFromInput(readH2oRuleForm(form));
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      rules: upsertH2oRule(runtime.rules, rule),
+      applyTunnelRuntime: true,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O rule added: ${rule.host} -> ${rule.kind}.`
+    });
+  }
+  if (action === 'add-h2o-subscription') {
+    const runtime = h2oRuntime();
+    const draft = readH2oSubscriptionForm(form);
+    h2oSubscriptionDraft = draft;
+    const validationError = h2oCustomSubscriptionValidationError(draft);
+    if (validationError) {
+      state = {
+        ...state,
+        feedback: {
+          tone: 'warning',
+          message: validationError
+        }
+      };
+      render();
+      return;
+    }
+    const wasEditing = Boolean(h2oSubscriptionEditId);
+    const subscription = h2oCustomSubscriptionFromInput({
+      ...draft,
+      id: h2oSubscriptionEditId
+    });
+    if (!subscription) {
+      state = {
+        ...state,
+        feedback: {
+          tone: 'warning',
+          message: '请输入有效的 http 或 https 订阅链接。'
+        }
+      };
+      render();
+      return;
+    }
+    resetH2oSubscriptionDraft();
+    const subscriptions = upsertH2oSubscription(runtime.subscriptions, subscription);
+    const editingActive = wasEditing && subscription.id === runtime.activeSubscription.id;
+    const shouldActivate = editingActive || !h2oSubscriptionUsable(runtime.activeSubscription);
+    const activeSubscription = shouldActivate
+      ? subscription
+      : subscriptions.find((item) => item.id === runtime.activeSubscription.id) || runtime.activeSubscription;
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      subscriptions,
+      activeSubscription,
+      activeSubscriptionId: activeSubscription.id,
+      status: runtime.running ? 'running' : h2oSubscriptionUsable(activeSubscription) ? 'ready' : 'subscription-required',
+      applyTunnelRuntime: shouldActivate,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: wasEditing
+        ? `H2O custom subscription updated: ${subscription.name}${shouldActivate ? '' : '; active subscription unchanged'}.`
+        : `H2O custom subscription saved: ${subscription.name}${shouldActivate ? ' and selected because no usable active subscription exists' : '; active subscription unchanged'}.`
+    });
+  }
+});
+
+root.addEventListener('pointerdown', (event) => {
+  if (isWindows && screen === 'appcenter' && !mincaveUi) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target || event.button !== 0) return;
+  if (target.closest('button,input,select,a')) return;
+  const dragHandle = target.closest('[data-window-drag]');
+  if (!dragHandle || typeof api.moveWindowBy !== 'function') return;
+  windowDragSequence = (windowDragSequence + 1) % 1000;
+  const dragId = Date.now() * 1000 + windowDragSequence;
+  windowDrag = {
+    dragId,
+    pointerId: event.pointerId,
+    screenX: event.screenX,
+    screenY: event.screenY,
+    startScreenX: event.screenX,
+    startScreenY: event.screenY,
+    totalDx: 0,
+    totalDy: 0
+  };
+  void api.startWindowDrag?.({ dragId });
+  dragHandle.setPointerCapture?.(event.pointerId);
+  document.body.classList.add('is-window-dragging');
+  event.preventDefault();
+});
+
+window.addEventListener('pointermove', (event) => {
+  if (!windowDrag || event.pointerId !== windowDrag.pointerId) return;
+  const dx = Math.round(event.screenX - windowDrag.screenX);
+  const dy = Math.round(event.screenY - windowDrag.screenY);
+  if (!dx && !dy) return;
+  windowDrag.screenX = event.screenX;
+  windowDrag.screenY = event.screenY;
+  windowDrag.totalDx = Math.round(event.screenX - windowDrag.startScreenX);
+  windowDrag.totalDy = Math.round(event.screenY - windowDrag.startScreenY);
+  void api.moveWindowBy?.({
+    dragId: windowDrag.dragId,
+    dx,
+    dy,
+    totalDx: windowDrag.totalDx,
+    totalDy: windowDrag.totalDy
+  });
+  event.preventDefault();
+});
+
+window.addEventListener('pointerup', finishWindowDrag);
+window.addEventListener('pointercancel', finishWindowDrag);
+root.addEventListener('mouseleave', () => {
+  if (!windowDrag) void api.hideTopDockIfPending?.();
+});
+
+function finishWindowDrag(event) {
+  if (!windowDrag) return;
+  if (event && windowDrag && event.pointerId !== windowDrag.pointerId) return;
+  const dragId = windowDrag.dragId;
+  const hasFinalCoordinates = event?.type === 'pointerup'
+    && Number.isFinite(event.screenX)
+    && Number.isFinite(event.screenY);
+  const totalDx = hasFinalCoordinates
+    ? Math.round(event.screenX - windowDrag.startScreenX)
+    : windowDrag.totalDx;
+  const totalDy = hasFinalCoordinates
+    ? Math.round(event.screenY - windowDrag.startScreenY)
+    : windowDrag.totalDy;
+  windowDrag = null;
+  document.body.classList.remove('is-window-dragging');
+  void api.finishWindowDrag?.({ dragId, totalDx, totalDy });
+}
+
+async function installOverseasProxy(runId) {
+  if (!isInternalConnected()) return null;
+  const leaseId = state.connection?.leaseId;
+  const subject = state.connection?.subject;
+  const current = () => busyActionRunId === runId
+    && isInternalConnected()
+    && state.connection?.leaseId === leaseId
+    && state.connection?.subject === subject;
+  const accept = (next) => {
+    // A disconnect/session change broadcast wins over an older install reply.
+    if (!current()) return false;
+    if (next && typeof next === 'object' && 'connection' in next) state = next;
+    render();
+    return current();
+  };
+  if (!state.apps?.appcenter?.installed) {
+    if (!accept(await api.installAppCenter())) return null;
+    if (!state.apps?.appcenter?.installed) return null;
+  }
+  if (!state.apps?.h2o?.installed || !state.apps?.h2o?.enabled) {
+    if (!current() || !accept(await api.enableH2o())) return null;
+  }
+  return null; // State was accepted per step; never replay an intermediate reply.
+}
+
+async function runAction(action, payload) {
+  if (action === 'cancelNetworkOperation') {
+    if (cancelNetworkOperationInFlight) return;
+    const operationId = typeof payload?.id === 'string' && payload.id.trim()
+      ? payload.id.trim()
+      : currentNetworkOperation()?.id || null;
+    const cancelRunId = ++actionRunSequence;
+    cancelNetworkOperationInFlight = true;
+    // Logical cancel must be able to run while Connect/Login/Repair is still
+    // awaiting IPC. Invalidate that older renderer turn so its eventual
+    // response/finally cannot overwrite the paused state or clear a retry.
+    busyAction = '';
+    busyActionRunId = cancelRunId;
+    render();
+    try {
+      const next = await api.cancelNetworkOperation?.(operationId);
+      if (
+        busyActionRunId === cancelRunId
+        && next
+        && typeof next === 'object'
+        && 'connection' in next
+      ) {
+        state = next;
+      }
+    } catch {
+      if (busyActionRunId === cancelRunId) {
+        const next = await api.getState().catch(() => null);
+        if (next && typeof next === 'object' && 'connection' in next) state = next;
+      }
+    } finally {
+      cancelNetworkOperationInFlight = false;
+      if (busyActionRunId === cancelRunId) busyActionRunId = 0;
+      render();
+    }
+    return;
+  }
+  if (networkOperationBlocksMutation() && isNetworkMutatingAction(action)) return;
+  if (busyAction) return;
+  const runId = ++actionRunSequence;
+  busyAction = action;
+  busyActionRunId = runId;
+  render();
+  try {
+    const handlers = {
+      connectGuest: () => api.connectGuest(),
+      disconnect: () => api.disconnect(),
+      resetLocalNetworkIdentity: () => api.resetLocalNetworkIdentity?.(),
+      'login-employee': () => api.loginEmployee(payload),
+      'login-feishu': () => api.startFeishuLogin?.(),
+      refreshMincaveAccess: () => api.refreshMincaveAccess?.(),
+      'cancel-feishu-login': () => api.cancelFeishuLogin?.(),
+      'save-config': () => api.saveConfig(payload),
+      installAppCenter: () => api.installAppCenter(),
+      installOverseasProxy: () => installOverseasProxy(runId),
+      enableH2o: () => api.enableH2o(),
+      launchH2o: () => api.launchH2o?.() || api.enableH2o(),
+      stopH2o: () => api.stopH2o?.(),
+      setH2oMode: () => api.setH2oMode?.(payload),
+      selectH2oNode: () => api.selectH2oNode?.(payload),
+      updateH2oRuntime: () => api.updateH2oRuntime?.(payload),
+      refreshH2oSubscription: () => api.refreshH2oSubscription?.(payload),
+      issueH2oClashLink: () => api.issueH2oClashLink?.(payload),
+      provisionH2oOversea: () => api.provisionH2oOversea?.(payload),
+      openH2oTestWindow: () => api.openH2oTestWindow?.(payload),
+      checkUpdates: () => api.checkUpdates(),
+      applyUpdate: () => api.applyUpdate?.(),
+      installRelease: () => api.installRelease?.(payload),
+      showDownloadedInstaller: () => api.showDownloadedInstaller?.(),
+      restartApp: () => api.restartApp?.(),
+      openRollback: () => api.openRollbackInstaller?.(payload),
+      refreshDiagnostics: () => api.refreshDiagnostics?.(),
+      repairSystemNetwork: () => api.repairSystemNetwork?.(),
+      repairNetworkOwnership: () => api.repairNetworkOwnership?.(),
+      openDiagnosticLogs: () => api.openDiagnosticLogs?.(),
+      exportDiagnostics: () => api.exportDiagnostics?.(),
+      openAdmin: () => api.openAdmin()
+    };
+    if (handlers[action]) {
+      const next = await handlers[action]();
+      if (busyActionRunId !== runId) return;
+      if (next && typeof next === 'object' && 'connection' in next) {
+        state = next;
+        if (action === 'login-employee') syncEmployeeLoginDraftFromState();
+      }
+      if (action === 'installAppCenter' && state.apps?.appcenter?.installed) {
+        await setScreen('appcenter');
+      }
+      if (action === 'launchH2o' && state.apps?.h2o?.installed) {
+        selectedAppId = 'h2o';
+        appCenterRoute = 'h2o';
+        appInspectorCollapsed = true;
+      }
+    }
+  } catch {
+    if (busyActionRunId !== runId) return;
+    const next = await api.getState().catch(() => null);
+    if (next && typeof next === 'object' && 'connection' in next) {
+      state = next;
+    }
+  } finally {
+    if (busyActionRunId === runId) {
+      busyAction = '';
+      busyActionRunId = 0;
+      if (['connectGuest', 'disconnect', 'resetLocalNetworkIdentity'].includes(action) && !isGuestConnectionActive()) {
+        modeDraft = 'employee';
+      }
+      render();
+    }
+  }
+}
+
+async function setScreen(nextScreen) {
+  screen = nextScreen;
+  phoneMenuOpen = false;
+  if (mincaveUi) {
+    render();
+    return;
+  }
+  if (nextScreen === 'appcenter') {
+    await api.setWindowMode?.('appcenter');
+  } else {
+    await api.setWindowMode?.('launcher');
+  }
+  render();
+}
+
+function handlePhoneBack() {
+  phoneMenuOpen = false;
+  appShellMenuOpen = false;
+  if (screen === 'advanced') {
+    modeDraft = preferredLauncherMode();
+    void setScreen('launcher');
+    return;
+  }
+  if (isEmployeeLoginVisible()) {
+    modeDraft = preferredLauncherMode();
+    render();
+    return;
+  }
+  void api.setWindowMode?.('launcher');
+  render();
+}
+
+function readEmployeeAccountHistory() {
+  try {
+    const raw = window.localStorage?.getItem(EMPLOYEE_ACCOUNT_HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, EMPLOYEE_ACCOUNT_HISTORY_LIMIT);
+  } catch (_err) {
+    return [];
+  }
+}
+
+function writeEmployeeAccountHistory() {
+  try {
+    window.localStorage?.setItem(EMPLOYEE_ACCOUNT_HISTORY_KEY, JSON.stringify(employeeAccountHistory));
+  } catch (_err) {
+    // Account history is a convenience feature; login should keep working if storage is unavailable.
+  }
+}
+
+function rememberEmployeeAccount(account) {
+  const normalized = String(account || '').trim();
+  if (!normalized) return;
+  employeeAccountHistory = [
+    normalized,
+    ...employeeAccountHistory.filter((item) => item.toLowerCase() !== normalized.toLowerCase())
+  ].slice(0, EMPLOYEE_ACCOUNT_HISTORY_LIMIT);
+  writeEmployeeAccountHistory();
+}
+
+function syncEmployeeLoginDraftFromState() {
+  if (state?.identity?.provider === 'feishu') return;
+  const account = state?.identity?.kind === 'user' ? String(state.identity.account || '').trim() : '';
+  if (!account) return;
+  rememberEmployeeAccount(account);
+  if (!employeeLoginDraft.account) {
+    employeeLoginDraft = {
+      ...employeeLoginDraft,
+      account
+    };
+  }
+}
+
+function isEmployeeLoginVisible() {
+  const connected = state.connection?.state === 'connected';
+  return modeDraft === 'employee'
+    && !isRetainedEmployeeSession()
+    && (!connected || state.connection?.mode !== 'employee');
+}
+
+function isRetainedEmployeeSession() {
+  const connection = state?.connection || {};
+  const expiresAt = Date.parse(state?.auth?.expiresAt || '');
+  const authCurrent = Boolean(state?.auth)
+    && (!Number.isFinite(expiresAt) || expiresAt > Date.now());
+  return state?.identity?.kind === 'user'
+    && authCurrent
+    && connection.mode === 'employee'
+    && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable'].includes(connection.state);
+}
+
+function isGuestConnectionActive() {
+  const connection = state?.connection || {};
+  return connection.mode === 'guest'
+    && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
+}
+
+function preferredLauncherMode() {
+  return isGuestConnectionActive() ? 'guest' : 'employee';
+}
+
+function anonymousUiVisibility() {
+  const presentation = state?.launcherProductPresentation;
+  const currentProductId = state?.config?.productId || 'mx-h2i';
+  if (presentation?.productId && presentation.productId !== currentProductId) return 'advanced';
+  return ['primary', 'advanced', 'hidden'].includes(presentation?.anonymousUiVisibility)
+    ? presentation.anonymousUiVisibility
+    : 'advanced';
+}
+
+function anonymousEnrollmentPolicy() {
+  const policy = state?.launcherProductPresentation?.anonymousEnrollmentPolicy;
+  return ['enabled', 'drain', 'disabled'].includes(policy) ? policy : 'enabled';
+}
+
+function isGuestConnectionReady(connection = state?.connection) {
+  return connection?.mode === 'guest'
+    && connection?.state === 'connected'
+    && connection?.health?.wireGuard === 'ready'
+    && connection?.health?.internalApi === 'ready'
+    && connection?.health?.splitDns === 'ready'
+    && connection?.wireGuard?.active === true
+    && connection?.diagnostics?.route?.ok === true
+    && connection?.diagnostics?.internalApi?.ok === true;
+}
+
+function isGuestTunnelActive(connection = state?.connection) {
+  return connection?.mode === 'guest'
+    && (
+      connection?.wireGuard?.active === true
+      || connection?.state === 'tunnel-only'
+      || isGuestConnectionReady(connection)
+    );
+}
+
+function anonymousRecoveryBlockedByPolicy(connection = state?.connection) {
+  return anonymousEnrollmentPolicy() === 'disabled'
+    && connection?.mode === 'guest'
+    && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection?.state)
+    && !isGuestConnectionReady(connection);
+}
+
+function shouldRenderPrimaryAnonymousEntry() {
+  return !isGuestConnectionActive() && anonymousUiVisibility() === 'primary';
+}
+
+function shouldRenderAnonymousAccessPanel() {
+  return isGuestConnectionActive() || anonymousUiVisibility() === 'advanced';
+}
+
+function canStartAnonymousEnrollment() {
+  return anonymousEnrollmentPolicy() === 'enabled';
+}
+
+function canRenewAnonymousEnrollment() {
+  const policy = anonymousEnrollmentPolicy();
+  if (policy === 'enabled') return true;
+  if (policy === 'disabled') return false;
+  return state?.connection?.hasLeaseCapability === true;
+}
+
+function anonymousPolicyMessage() {
+  if (anonymousEnrollmentPolicy() === 'disabled') {
+    return isGuestConnectionReady()
+      ? '管理员已停用 MX-H2I 匿名 enroll；现有匿名连接仍可查看并明确断开。'
+      : ANONYMOUS_LOGIN_DISABLED_MESSAGE;
+  }
+  if (anonymousEnrollmentPolicy() === 'drain') {
+    if (isGuestConnectionActive() && state?.connection?.hasLeaseCapability !== true) {
+      return '匿名连接正在收敛；当前保留连接缺少 lease capability，不能续租，但仍可查看并清理本地连接。';
+    }
+    return '匿名连接正在收敛：不接受新连接，仅持有有效 lease capability 的已有匿名连接可以续租。';
+  }
+  return '匿名 enroll 由 MX-H2I 产品策略独立控制；员工账号和飞书登录仍是默认入口。';
+}
+
+function guestConnectionPrompt() {
+  const ip = state?.connection?.localIp ? `（当前访客 IP：${state.connection.localIp}）` : '';
+  return `当前已连接访客模式${ip}。员工认证成功后会自动切换到员工网络；身份认证阶段失败、拒绝或取消时保留访客连接。`;
+}
+
+function currentNetworkOperation() {
+  const operation = state?.networkOperation;
+  if (!operation || typeof operation !== 'object') return null;
+  const id = typeof operation.id === 'string' ? operation.id.trim() : '';
+  const kind = String(operation.kind || '').toLowerCase();
+  const status = String(operation.status || '');
+  const idlessBackgroundRecovery = !id && kind === 'background-recovery';
+  if ((!id && !idlessBackgroundRecovery) || !['running', 'cancel-requested', 'paused'].includes(status)) return null;
+  return { ...operation, id: id || null, kind, status };
+}
+
+function networkOperationPaused() {
+  return currentNetworkOperation()?.status === 'paused'
+    && !rendererPendingNetworkOperation();
+}
+
+function networkOperationInProgress() {
+  const operation = currentNetworkOperation();
+  if (!operation?.id && operation?.kind === 'background-recovery') return false;
+  return ['running', 'cancel-requested'].includes(String(operation?.status || ''));
+}
+
+function networkOperationBlocksMutation() {
+  return cancelNetworkOperationInFlight
+    || networkOperationInProgress()
+    || Boolean(rendererPendingNetworkOperation());
+}
+
+function isNetworkMutatingAction(action) {
+  return [
+    'connectGuest',
+    'login-employee',
+    'login-feishu',
+    'repairSystemNetwork',
+    'repairNetworkOwnership',
+    'refreshDiagnostics',
+    'disconnect',
+    'resetLocalNetworkIdentity'
+  ].includes(action);
+}
+
+function networkOperationKind(operation = currentNetworkOperation()) {
+  return String(operation?.kind || '').toLowerCase();
+}
+
+function networkOperationIsRepair(operation = currentNetworkOperation()) {
+  return /repair|recover/.test(networkOperationKind(operation));
+}
+
+function networkOperationIsGuestConnect(operation = currentNetworkOperation()) {
+  return /guest|visit|anonymous/.test(networkOperationKind(operation));
+}
+
+function rendererPendingNetworkOperation() {
+  const kind = busyAction === 'repairSystemNetwork'
+    ? 'manual-repair'
+    : busyAction === 'connectGuest'
+      ? 'guest-connect'
+      : busyAction === 'login-employee'
+        ? 'employee-connect'
+        : null;
+  if (!kind) return null;
+  return {
+    id: '',
+    kind,
+    status: 'running',
+    stage: 'renderer-awaiting-main',
+    cancelable: true,
+    promptActive: false,
+    message: null
+  };
+}
+
+function renderNetworkOperationControl() {
+  const visibleOperation = currentNetworkOperation();
+  if (
+    !visibleOperation?.id
+    && visibleOperation?.kind === 'background-recovery'
+    && ['disconnect', 'resetLocalNetworkIdentity'].includes(busyAction)
+  ) return '';
+  const pendingRendererOperation = rendererPendingNetworkOperation();
+  const operation = visibleOperation?.status === 'paused' && pendingRendererOperation
+    ? pendingRendererOperation
+    : visibleOperation || pendingRendererOperation;
+  if (!operation) return '';
+  if (operation.status === 'paused') {
+    const retry = networkOperationIsRepair(operation)
+      ? '<button class="secondary-button" type="button" data-action="repairSystemNetwork">重新修复网络</button>'
+      : networkOperationIsGuestConnect(operation)
+        ? '<button class="secondary-button" type="button" data-action="connectGuest">重新连接</button>'
+        : '<button class="secondary-button" type="button" data-action="select-mode" data-mode="employee">返回员工登录</button>';
+    return `
+      <section class="connection-recovery-panel" role="status" aria-live="polite" data-network-operation-status="paused">
+        <strong>已停止后续恢复</strong>
+        <span>${escapeHtml(operation.message || '本次连接或恢复已暂停。')} 现有健康 WireGuard 与登录状态会保留；不会把“取消”当成断开连接，也不会自动继续或再次弹出权限框。</span>
+        <div class="connect-actions">${retry}</div>
+      </section>
+    `;
+  }
+  const cancelRequested = operation.status === 'cancel-requested' || cancelNetworkOperationInFlight;
+  const label = cancelRequested
+    ? '正在停止后续步骤'
+    : networkOperationIsRepair(operation)
+      ? '停止后续恢复'
+      : '取消本次连接';
+  return `
+    <section class="connection-recovery-panel" role="status" aria-live="polite" data-network-operation-status="${escapeAttr(operation.status)}">
+      <strong>${escapeHtml(operation.message || (networkOperationIsRepair(operation) ? '正在修复系统网络' : '正在建立网络连接'))}</strong>
+      <span>${isWindows ? '此按钮会停止后续步骤，不会断开或清理当前健康连接。' : '如果 macOS 系统权限框已经打开，请同时在系统权限框中点“取消”；此按钮会停止后续步骤，不会执行断开或清理当前健康连接。'}</span>
+      <div class="connect-actions">
+        <button class="secondary-button" type="button" data-action="cancelNetworkOperation" data-operation-id="${escapeAttr(operation.id || '')}" ${cancelRequested || operation.cancelable === false ? 'disabled' : ''}>${escapeHtml(label)}</button>
+      </div>
+    </section>
+  `;
+}
+
+function isConnectionPending() {
+  if (state.connection?.diagnostics?.applicationAccessDenied && !rendererPendingNetworkOperation()) return false;
+  if (networkOperationPaused()) return false;
+  const operation = currentNetworkOperation();
+  const idlessBackgroundRecovery = !operation?.id && operation?.kind === 'background-recovery';
+  return networkOperationInProgress()
+    || (state?.connection?.state === 'connecting' && !idlessBackgroundRecovery)
+    || busyAction === 'connectGuest'
+    || busyAction === 'login-employee'
+    || feishuAuthStage() === 'connecting';
+}
+
+function pendingConnectionLabel() {
+  if (state?.connection?.state === 'lease-only') return '等待系统授权';
+  if (state?.connection?.state === 'tunnel-only') return '校验保留隧道';
+  if (feishuAuthStage() === 'connecting') return '正在连接飞书员工模式';
+  if (busyAction === 'login-employee') return '正在连接员工模式';
+  return '等待连接中';
+}
+
+function retainedConnectionActionLabel(connection = state?.connection) {
+  switch (connection?.state) {
+    case 'lease-only':
+      return '等待授权';
+    case 'tunnel-only':
+      return '恢复中';
+    case 'server-unavailable':
+      return '等待服务';
+    case 'network-unavailable':
+      return '等待网络';
+    case 'forbidden':
+      return '修复连接';
+    default:
+      return '连接';
+  }
+}
+
+function feishuAuthFlow() {
+  const flow = state?.authFlow;
+  return flow?.provider === 'feishu' ? flow : null;
+}
+
+function feishuAuthStage() {
+  return String(feishuAuthFlow()?.stage || '');
+}
+
+function feishuAuthPending() {
+  if (networkOperationPaused() && feishuAuthStage() === 'connecting') return false;
+  return Boolean(feishuAuthFlow())
+    || busyAction === 'login-feishu'
+    || busyAction === 'cancel-feishu-login';
+}
+
+function isInternalConnected() {
+  return state?.connection?.state === 'connected';
+}
+
+function updateNeedsAttention() {
+  if (!isInternalConnected()) return false;
+  const update = state?.update || {};
+  return update.updateAvailable === true
+    || ['update-available', 'blocked', 'downloading', 'download-failed', 'ready-to-install', 'installer-opened', 'staged'].includes(update.status);
+}
+
+function renderCheckUpdatesButton(className = 'text-button') {
+  const connected = isInternalConnected();
+  const label = connected ? '检查更新' : '连接后检查';
+  const attention = updateNeedsAttention();
+  const disabled = busyAction === 'checkUpdates';
+  return `
+    <button class="${escapeAttr(className)} update-check-button ${attention ? 'has-update-attention' : ''}" type="button" data-action="checkUpdates" ${disabled ? 'disabled' : ''}>
+      <span>${escapeHtml(label)}</span>
+      ${attention ? '<span class="update-dot" aria-hidden="true"></span>' : ''}
+    </button>
+  `;
+}
+
+function render() {
+  if (!state) return;
+  if (mincaveUi) {
+    mincaveSnapshot = createMincaveSnapshot();
+    for (const listener of mincaveListeners) listener();
+    return;
+  }
+  rememberPhoneScroll();
+  const connected = state.connection?.state === 'connected';
+  const leaseOnly = state.connection?.state === 'lease-only';
+  const tunnelOnly = state.connection?.state === 'tunnel-only';
+  const connecting = isConnectionPending();
+  const degraded = ['server-unavailable', 'network-unavailable', 'forbidden'].includes(state.connection?.state);
+  const shellClass = screen === 'appcenter' ? 'is-appcenter' : 'is-phone';
+  root.innerHTML = `
+    <div class="mx-shell ${shellClass}">
+      ${screen === 'appcenter' ? '' : renderWindowChrome()}
+      ${screen === 'appcenter' ? renderWorkbench(connected, connecting) : renderPhone(connected, connecting, leaseOnly, tunnelOnly, degraded)}
+    </div>
+    ${renderReleaseUpdatePrompt()}
+  `;
+  restorePhoneScroll();
+  restoreAppCenterScroll();
+}
+
+function createMincaveSnapshot() {
+  const connected = isInternalConnected();
+  const pending = isConnectionPending();
+  const connection = state.connection || {};
+  const retained = ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
+  const apps = appCatalog().filter((app) => {
+    const action = appPrimaryAction(app, connected);
+    return !['diagnostics', 'luo'].includes(app.appId) && action.action !== 'select-app';
+  }).map((app) => ({
+    id: app.appId,
+    name: app.displayName,
+    description: app.description,
+    category: app.category,
+    installed: app.installed === true,
+    running: app.runtimeState === 'running',
+    error: appVisibleErrorMessage(app),
+    action: mincaveAppPrimaryAction(app, connected)
+  }));
+  const update = state.update || {};
+  return {
+    runtime: state,
+    loginError: typeof state.mincaveLoginError === 'string' ? state.mincaveLoginError : '',
+    access: state.mincaveAccess || { status: 'checking', allowed: false, canManage: false, role: null },
+    busyAction,
+    screen,
+    h2oOpen: screen === 'appcenter' && appCenterRoute === 'h2o',
+    showLogin: screen !== 'advanced' && (isEmployeeLoginVisible() || (!connected && !retained && !isGuestConnectionActive())),
+    connected,
+    pending,
+    paused: networkOperationPaused(),
+    mutating: networkOperationBlocksMutation(),
+    retainedEmployee: isRetainedEmployeeSession(),
+    guestActive: isGuestConnectionActive(),
+    anonymousBlocked: anonymousRecoveryBlockedByPolicy(),
+    guestCanRenew: canRenewAnonymousEnrollment(),
+    caption: connectionCaption(),
+    apps,
+    loginHtml: renderEmployeeLogin(pending),
+    passwordLogin: state.mincavePasswordLogin === true,
+    networkControl: mincaveNetworkControl(),
+    feedbackHtml: renderFeedback(),
+    advancedHtml: renderAnonymousAccessPanel() + renderInstallationIdentityPanel()
+      + renderWindowsOwnershipRecoveryPanel() + renderDiagnosticLogPanel()
+      + renderWireGuardDiagnostics() + renderConfigForm(),
+    overseasSubscription: mincaveOverseasSubscription(),
+    releasePrompt: Boolean(renderReleaseUpdatePrompt()),
+    update: {
+      ...update,
+      summary: updateSummaryText(update),
+      actionLabel: updateApplyLabel(update),
+      canApply: Boolean(update.artifactUrl)
+        && !busyAction
+        && !['blocked', 'downloading', 'staged', 'installer-opened'].includes(update.status),
+      notesHtml: update.releaseNotes ? renderReleaseNotesMarkdown(update.releaseNotes) : '',
+      historyHtml: renderReleaseHistory(update) + renderRollbackSlots(update)
+    }
+  };
+}
+
+function mincaveAppPrimaryAction(app, connected) {
+  if (app.appId !== 'h2o') return appPrimaryAction(app, connected);
+  if (!app.installed || !app.enabled || busyAction === 'installOverseasProxy') {
+    return {
+      action: 'installOverseasProxy',
+      label: busyAction === 'installOverseasProxy' ? '安装中' : '安装',
+      disabled: !connected || Boolean(busyAction) || networkOperationBlocksMutation()
+    };
+  }
+  return { action: 'showH2oManager', label: '打开管理', disabled: !connected || Boolean(busyAction) };
+}
+
+function mincaveOverseasSubscription() {
+  const link = h2oRuntime().clashLink;
+  const expiry = Date.parse(link?.expiresAt || '');
+  const url = link?.url && (!Number.isFinite(expiry) || expiry > Date.now()) ? link.url : '';
+  return {
+    url,
+    status: link?.status || 'missing',
+    loading: ['refreshH2oSubscription', 'issueH2oClashLink'].includes(busyAction),
+    canRefresh: isInternalConnected() && isUserIdentity() && state.apps?.h2o?.installed === true && !busyAction
+  };
+}
+
+function mincaveNetworkControl() {
+  const visible = currentNetworkOperation();
+  if (!visible?.id && visible?.kind === 'background-recovery'
+    && ['disconnect', 'resetLocalNetworkIdentity'].includes(busyAction)) return null;
+  const pending = rendererPendingNetworkOperation();
+  const operation = visible?.status === 'paused' && pending ? pending : visible || pending;
+  if (!operation || operation.status === 'paused') return null;
+  return {
+    id: operation.id || '',
+    cancelable: operation.cancelable !== false,
+    stopping: operation.status === 'cancel-requested' || cancelNetworkOperationInFlight
+  };
+}
+
+function releasePromptKey(update) {
+  return String(update?.planId || update?.releaseId || update?.latestVersion || '');
+}
+
+function renderReleaseUpdatePrompt() {
+  const update = state?.update || {};
+  const key = releasePromptKey(update);
+  const visible = update.status === 'update-available'
+    && update.deliveryMode === 'prompt-download-restart'
+    && key
+    && key !== dismissedReleasePromptKey
+    && busyAction !== 'checkUpdates';
+  if (!visible) return '';
+  const installer = /installer/i.test(update.artifactKind || update.componentKind || '');
+  const notes = update.releaseNotes || update.reason || 'Release Center 已发布新版本。';
+  return `
+    <div class="release-update-overlay" role="presentation">
+      <section class="release-update-dialog" role="dialog" aria-modal="true" aria-labelledby="release-update-title">
+        <img src="./assets/mingxi-logo.png" alt="" class="release-update-dialog__icon" />
+        <h2 id="release-update-title">发现 MX-H2I ${escapeHtml(update.latestVersion || '')} 更新</h2>
+        <div class="release-notes-markdown release-update-dialog__notes">
+          ${renderReleaseNotesMarkdown(notes)}
+        </div>
+        <p class="release-update-dialog__hint">
+          ${installer
+            ? '安装包会先下载并校验，之后交给系统安装器打开。'
+            : 'ASAR 会先下载并校验，之后可立即重启或等下次启动生效。'}
+        </p>
+        <div class="release-update-dialog__actions">
+          <button class="secondary-button" type="button" data-action="dismiss-release-update">稍后</button>
+          <button class="primary-button" type="button" data-action="accept-release-update">立即下载</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function rememberPhoneScroll() {
+  const phone = root.querySelector('.mx-phone[data-scroll-key]');
+  const key = phone?.dataset.scrollKey;
+  if (!key) return;
+  phoneScrollTops.set(key, phone.scrollTop);
+}
+
+function restorePhoneScroll() {
+  const phone = root.querySelector('.mx-phone[data-scroll-key]');
+  const key = phone?.dataset.scrollKey;
+  if (!key) return;
+  const scrollTop = phoneScrollTops.get(key);
+  if (Number.isFinite(scrollTop)) phone.scrollTop = scrollTop;
+}
+
+function rememberAppGridScroll() {
+  const grid = root.querySelector('.appcenter-card-grid');
+  if (grid) appGridScrollTop = grid.scrollTop;
+}
+
+function restoreAppCenterScroll() {
+  const grid = root.querySelector('.appcenter-card-grid');
+  if (!grid) return;
+  grid.scrollTop = appGridScrollTop;
+}
+
+function renderWindowChrome() {
+  return `
+    <div class="window-chrome" aria-label="Window controls">
+      <div class="traffic-controls">
+        <button class="traffic-dot is-close" type="button" data-window-control="close" aria-label="Close"></button>
+        <button class="traffic-dot is-minimize" type="button" data-window-control="minimize" aria-label="Minimize"></button>
+        <button class="traffic-dot is-zoom" type="button" data-window-control="zoom" aria-label="Zoom"></button>
+      </div>
+      <div class="top-drag-strip" data-window-drag="true" aria-hidden="true"><span></span></div>
+    </div>
+  `;
+}
+
+function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = false, degraded = false) {
+  if (screen === 'advanced') return renderAdvancedPhone();
+  const mode = modeDraft;
+  const activeLease = connected || leaseOnly || tunnelOnly || degraded;
+  const retainedEmployee = isRetainedEmployeeSession();
+  const showEmployeeLogin = isEmployeeLoginVisible();
+  const disconnecting = busyAction === 'disconnect';
+  const recoveryPaused = networkOperationPaused();
+  const pendingMode = busyAction === 'login-employee' ? 'employee' : state.connection?.mode;
+  const anonymousRecoveryBlocked = anonymousRecoveryBlockedByPolicy();
+  const modeTitle = disconnecting
+    ? `${state.connection?.mode === 'employee' ? '员工' : '访客'}模式 正在断开`
+    : state.connection?.diagnostics?.applicationAccessDenied
+      ? '账号访问已被禁止'
+    : recoveryPaused
+      ? `${state.connection?.mode === 'employee' ? '员工' : '访客'}模式 恢复已暂停`
+    : connecting
+    ? `${pendingMode === 'employee' ? '员工' : '访客'}模式 连接中`
+    : anonymousRecoveryBlocked
+      ? '匿名登录已禁止'
+    : connected
+    ? showEmployeeLogin
+      ? '员工模式'
+      : `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 已连接`
+    : leaseOnly
+      ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 租约已保留`
+      : tunnelOnly
+        ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 正在恢复`
+        : degraded
+          ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 待恢复`
+    : mode === 'employee'
+      ? '员工模式'
+      : '访客模式';
+  return `
+    <section class="mx-phone" data-scroll-key="phone:launcher" aria-label="MX-H2I standalone launcher">
+      <header class="phone-bar" data-window-drag="true">
+        <button class="icon-button" type="button" data-action="phone-back" aria-label="Back">‹</button>
+        ${renderPhoneShellMenu('h2i')}
+      </header>
+
+      <section class="phone-hero">
+        <img class="brand-logo app-mark" src="./assets/mingxi-logo.png" alt="" aria-hidden="true" draggable="false" />
+        <p class="kicker">MX-H2I</p>
+        <h1>${escapeHtml(modeTitle)}</h1>
+        <p>${escapeHtml(connectionCaption())}</p>
+      </section>
+      ${renderFeedback()}
+      ${renderNetworkOperationControl()}
+      ${renderConnectionRecoverySteps(activeLease && !connected)}
+
+      ${retainedEmployee
+        ? renderEmployeeRecovery()
+        : showEmployeeLogin
+          ? renderEmployeeLogin(connecting)
+          : renderGuestConnect(connected, connecting, activeLease && !connected)}
+      ${renderConnectionStrip()}
+      ${renderPhoneFooterInfo(connected)}
+    </section>
+  `;
+}
+
+function renderEmployeeRecovery() {
+  const repairing = busyAction === 'repairSystemNetwork';
+  const disconnecting = busyAction === 'disconnect';
+  const operationPending = networkOperationBlocksMutation();
+  const provider = state?.auth?.provider === 'feishu' ? '飞书' : '员工账号';
+  return `
+    <section class="connect-panel employee-recovery-panel" role="status" aria-live="polite">
+      <button class="connect-dial is-recovering" type="button" disabled aria-busy="${repairing ? 'true' : 'false'}">
+        <span>${repairing ? '修复中' : '会话已保留'}</span>
+      </button>
+      <p class="anonymous-access-note">${escapeHtml(`${provider}身份和员工隧道仍有效，无需重新登录；当前仅修复 PAC / split DNS 系统路径。`)}</p>
+      <div class="connect-actions">
+        <button class="text-button" type="button" data-action="repairSystemNetwork" ${repairing || disconnecting || operationPending ? 'disabled' : ''}>${repairing ? '正在修复网络' : '修复网络'}</button>
+        <button class="text-button" type="button" data-action="disconnect" ${repairing || disconnecting || operationPending ? 'disabled' : ''}>${disconnecting ? '正在断开' : '断开连接'}</button>
+        <button class="text-button" type="button" data-action="show-advanced">高级选项</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderGuestConnect(connected, connecting, retainedConnection = false) {
+  const disconnecting = busyAction === 'disconnect';
+  const disconnectable = connected || isGuestTunnelActive();
+  const retainedGuest = state.connection?.mode === 'guest'
+    && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(state.connection?.state);
+  const renewalBlocked = retainedGuest && !canRenewAnonymousEnrollment();
+  const policyBlocked = anonymousRecoveryBlockedByPolicy();
+  const recovering = retainedConnection && !disconnectable && !policyBlocked;
+  const label = disconnecting
+    ? '正在断开'
+    : disconnectable
+      ? '断开连接'
+      : connecting
+        ? pendingConnectionLabel()
+        : policyBlocked
+          ? '匿名登录已禁止'
+        : renewalBlocked
+          ? '匿名续租已停用'
+          : recovering
+            ? retainedConnectionActionLabel()
+            : '连接';
+  const action = disconnectable ? 'disconnect' : 'connectGuest';
+  const disabled = connecting || disconnecting || (!disconnectable && renewalBlocked);
+  return `
+    <section class="connect-panel">
+      <button class="connect-dial ${disconnectable ? 'is-connected' : ''} ${connecting ? 'is-connecting' : ''} ${recovering ? 'is-recovering' : ''} ${disconnecting ? 'is-disconnecting' : ''}" type="button" data-action="${action}" aria-busy="${(connecting || disconnecting || recovering) ? 'true' : 'false'}" ${disabled ? 'disabled' : ''}>
+        <span>${escapeHtml(label)}</span>
+      </button>
+      ${policyBlocked ? `<p class="anonymous-access-note">${escapeHtml(ANONYMOUS_LOGIN_DISABLED_MESSAGE)}</p>` : ''}
+      <div class="connect-actions">
+        <button class="text-button" type="button" data-action="select-mode" data-mode="employee">员工登录</button>
+        ${renderCheckUpdatesButton('text-button')}
+        <button class="text-button" type="button" data-action="show-advanced">高级选项</button>
+        ${retainedGuest ? `<button class="text-button" type="button" data-action="resetLocalNetworkIdentity" ${disconnectable ? 'disabled' : ''}>${disconnectable ? '请先断开后清理' : '清理旧连接'}</button>` : ''}
+      </div>
+    </section>
+  `;
+}
+
+function renderConnectionRecoverySteps(show) {
+  if (!show || networkOperationPaused() || anonymousRecoveryBlockedByPolicy()) return '';
+  if (state.connection?.diagnostics?.applicationAccessDenied) return '';
+  const connection = state.connection || {};
+  const health = connection.health || {};
+  const diagnostics = connection.diagnostics || {};
+  const wireGuardReady = health.wireGuard === 'ready'
+    || diagnostics?.wireGuard?.ready === true
+    || diagnostics?.wireGuard?.active === true
+    || connection.state === 'tunnel-only';
+  const internalReady = health.internalApi === 'ready';
+  const systemPathReady = connection.state === 'connected';
+  const platform = state.platform || state.runtime?.platform || '';
+  const systemPathLabel = platform === 'win32' ? 'PAC / NRPT / 浏览器路径' : 'Split DNS / 本机 DNS relay';
+  const rows = [
+    {
+      label: '本机租约 / IP',
+      detail: connection.localIp || '等待租约',
+      ready: Boolean(connection.localIp)
+    },
+    {
+      label: 'WireGuard / 守护进程',
+      detail: wireGuardReady ? '已保留或已运行' : (health.wireGuard || '校验中'),
+      ready: wireGuardReady
+    },
+    {
+      label: 'Internal API',
+      detail: internalReady ? 'ready' : (health.internalApi || '校验中'),
+      ready: internalReady
+    },
+    {
+      label: systemPathLabel,
+      detail: systemPathReady ? 'ready' : '恢复校验中',
+      ready: systemPathReady
+    }
+  ];
+  return `
+    <section class="connection-recovery-panel" role="status" aria-live="polite">
+      <strong>正在原位恢复连接</strong>
+      <span>不会卸载或重建仍在运行的隧道；完成后会自动切回已连接。</span>
+      <div class="connection-recovery-steps">
+        ${rows.map((row) => `
+          <div class="connection-recovery-step" data-state="${row.ready ? 'ready' : 'pending'}">
+            <span>${escapeHtml(row.label)}</span>
+            <strong>${escapeHtml(row.detail)}</strong>
+          </div>
+        `).join('')}
+      </div>
+      ${currentNetworkOperation() ? '' : `
+        <div class="connect-actions">
+          <button class="secondary-button" type="button" data-action="cancelNetworkOperation">暂停自动恢复</button>
+        </div>
+        <span>如果 macOS 系统权限框已经打开，请同时在系统权限框中点“取消”；暂停不会断开或清理当前健康连接。</span>
+      `}
+    </section>
+  `;
+}
+
+function renderEmployeeLogin(connecting) {
+  const guestActive = isGuestConnectionActive();
+  const loginPending = busyAction === 'login-employee';
+  const feishuFlow = feishuAuthFlow();
+  const feishuStage = networkOperationPaused() ? '' : feishuAuthStage();
+  const feishuPending = feishuAuthPending();
+  const feishuCancelable = Boolean(feishuFlow) && feishuStage !== 'connecting';
+  const replacingGuest = guestActive || (
+    (loginPending || feishuStage === 'connecting')
+    && state.networkEvent?.name === 'staff:connect'
+    && state.networkEvent?.reason === 'visit-to-staff'
+  );
+  const historyOptions = employeeAccountHistory
+    .map((account) => `<option value="${escapeAttr(account)}"></option>`)
+    .join('');
+  const transitionMessage = loginPending
+    ? (replacingGuest
+        ? '正在验证员工身份；认证失败或取消时保留访客连接，成功后开始系统网络切换。'
+        : '正在验证员工身份并建立员工网络。')
+    : feishuStage === 'connecting'
+      ? (replacingGuest
+          ? '飞书身份验证通过；正在切换员工网络，系统网络切换阶段会替换访客通道。'
+          : '飞书身份验证通过；正在建立员工网络。')
+      : feishuFlow
+        ? (guestActive
+            ? `正在等待飞书授权；当前访客 IP ${state.connection?.localIp || '保持中'} 不会被断开。`
+            : '已打开系统浏览器，正在等待飞书授权。')
+        : '';
+  const fieldsDisabled = loginPending || feishuPending;
+  const feishuAction = feishuCancelable ? 'cancel-feishu-login' : 'login-feishu';
+  const feishuDisabled = connecting
+    || loginPending
+    || feishuStage === 'connecting'
+    || busyAction === 'cancel-feishu-login';
+  const feishuLabel = busyAction === 'login-feishu'
+    ? '正在打开飞书'
+    : busyAction === 'cancel-feishu-login'
+      ? '正在取消飞书登录'
+      : feishuStage === 'connecting'
+        ? '正在切换飞书员工模式'
+        : feishuCancelable
+          ? '取消飞书登录'
+          : '使用飞书登录';
+  if (mincaveUi) {
+    // L2 (de-ladder2 docs/49): the account/password form is only rendered when the main
+    // process allows it (MX_H2I_MINCAVE_PASSWORD_LOGIN); the React login page keeps it
+    // hidden until the logo is tapped five times. It reuses the legacy form's handlers.
+    const passwordForm = state.mincavePasswordLogin === true ? `
+      <form class="mincave-password-login" data-form-action="login-employee" aria-label="账号密码登录">
+        ${loginPending && transitionMessage ? `<div class="login-transition" role="status" aria-live="polite"><span>${escapeHtml(transitionMessage)}</span></div>` : ''}
+        <label class="field">
+          <span>账号</span>
+          <input name="account" data-employee-login-field="account" value="${escapeAttr(employeeLoginDraft.account)}" list="employee-account-history" autocomplete="username" placeholder="Username/Email/Phone" ${fieldsDisabled ? 'disabled' : ''} />
+          <datalist id="employee-account-history">${historyOptions}</datalist>
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input name="password" data-employee-login-field="password" value="${escapeAttr(employeeLoginDraft.password)}" type="password" autocomplete="current-password" placeholder="Password" ${fieldsDisabled ? 'disabled' : ''} />
+        </label>
+        <button class="primary-button block-button" type="submit" aria-busy="${loginPending ? 'true' : 'false'}" ${connecting || feishuPending ? 'disabled' : ''}>
+          ${loginPending ? '正在登录' : '账号密码登录'}
+        </button>
+      </form>
+    ` : '';
+    return `
+      <section class="login-panel" aria-label="飞书登录">
+        <button class="primary-button block-button mincave-feishu-login" type="button" data-action="${feishuAction}" aria-busy="${feishuPending && !feishuCancelable ? 'true' : 'false'}" ${feishuDisabled ? 'disabled' : ''}>
+          ${escapeHtml(feishuLabel)}
+        </button>
+      </section>
+      ${passwordForm}
+    `;
+  }
+  return `
+    <form class="login-panel" data-form-action="login-employee">
+      ${transitionMessage
+        ? `<div class="login-transition" role="status" aria-live="polite"><span class="login-transition-wave" aria-hidden="true"></span><span>${escapeHtml(transitionMessage)}</span></div>`
+        : guestActive ? `<div class="login-notice">${escapeHtml(guestConnectionPrompt())}</div>` : ''}
+      <label class="field">
+        <span>账号</span>
+        <input name="account" data-employee-login-field="account" value="${escapeAttr(employeeLoginDraft.account)}" list="employee-account-history" autocomplete="username" placeholder="Username/Email/Phone" ${fieldsDisabled ? 'disabled' : ''} />
+        <datalist id="employee-account-history">${historyOptions}</datalist>
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input name="password" data-employee-login-field="password" value="${escapeAttr(employeeLoginDraft.password)}" type="password" autocomplete="current-password" placeholder="Password" ${fieldsDisabled ? 'disabled' : ''} />
+      </label>
+      <button class="primary-button block-button" type="submit" aria-busy="${loginPending ? 'true' : 'false'}" ${connecting || feishuPending ? 'disabled' : ''}>
+        ${loginPending ? (replacingGuest ? '正在切换员工模式' : '正在连接员工模式') : guestActive ? '登录并切换员工模式' : connecting ? '连接处理中' : '连接'}
+      </button>
+      <button class="secondary-button block-button" type="button" data-action="${feishuAction}" aria-busy="${feishuPending && !feishuCancelable ? 'true' : 'false'}" ${feishuDisabled ? 'disabled' : ''}>
+        ${escapeHtml(feishuLabel)}
+      </button>
+      ${renderPrimaryAnonymousEntry(connecting, feishuPending)}
+      ${guestActive ? `
+        <button class="secondary-button block-button" type="button" data-action="disconnect" ${connecting || feishuPending || busyAction === 'disconnect' ? 'disabled' : ''}>
+          ${busyAction === 'disconnect' ? '正在断开访客模式' : '仅断开访客模式'}
+        </button>
+      ` : ''}
+      <button class="secondary-button block-button" type="button" data-action="show-advanced">高级选项</button>
+    </form>
+  `;
+}
+
+function renderPrimaryAnonymousEntry(connecting, feishuPending) {
+  if (!shouldRenderPrimaryAnonymousEntry()) return '';
+  if (!canStartAnonymousEnrollment()) {
+    return `<div class="login-notice" role="status">${escapeHtml(anonymousPolicyMessage())}</div>`;
+  }
+  return `
+    <button class="secondary-button block-button" type="button" data-action="connectGuest" ${connecting || feishuPending ? 'disabled' : ''}>
+      匿名连接
+    </button>
+  `;
+}
+
+function renderPhoneFooterInfo(connected) {
+  const update = state.update || {};
+  const version = update.currentVersion || '0.1.0';
+  const channel = update.channel || state.config?.releaseChannel || 'stable';
+  const status = update.status || (connected ? 'ready' : state.connection?.state || 'idle');
+  const latest = update.latestVersion || version;
+  const releaseNotes = updateReleaseNotesPreview(update);
+  const hasArtifact = Boolean(update.artifactUrl);
+  const canApply = hasArtifact && !['downloading', 'staged', 'installer-opened'].includes(status);
+  const canRestart = update.restartPrompt || (status === 'staged' && update.restartRequired);
+  const canRevealInstaller = Boolean(update.stagedPath);
+  return `
+    <section class="phone-footer-info update-surface">
+      <div class="update-surface-head">
+        <div>
+          <h2>MX-H2I</h2>
+          <p>当前 ${escapeHtml(version)} · ${escapeHtml(channel)}</p>
+        </div>
+        <span class="status-pill" data-state="${escapeAttr(status)}">${escapeHtml(updateStatusLabel(status))}</span>
+      </div>
+      <div class="update-summary-line">
+        <strong>${escapeHtml(latest === version && !update.updateAvailable ? '已是最新版本' : `目标 ${latest}`)}</strong>
+        <span>${escapeHtml(updateSummaryText(update))}</span>
+      </div>
+      ${releaseNotes ? `
+        <div class="update-release-notes update-release-notes--compact">
+          <span>更新内容</span>
+          <div class="release-notes-markdown">${renderReleaseNotesMarkdown(releaseNotes)}</div>
+        </div>
+      ` : ''}
+      ${renderUpdateProgress(update)}
+      <div class="update-surface-actions">
+        ${renderCheckUpdatesButton('secondary-button')}
+        <button class="primary-button" type="button" data-action="applyUpdate" ${!canApply || busyAction ? 'disabled' : ''}>${escapeHtml(updateApplyLabel(update))}</button>
+        ${canRevealInstaller ? '<button class="secondary-button" type="button" data-action="showDownloadedInstaller">打开文件夹</button>' : ''}
+        ${canRestart ? '<button class="secondary-button" type="button" data-action="restartApp">重启</button>' : ''}
+      </div>
+      ${renderReleaseHistory(update)}
+      ${renderRollbackSlots(update)}
+    </section>
+  `;
+}
+
+function renderAdvancedPhone() {
+  return `
+    <section class="mx-phone advanced-phone" data-scroll-key="phone:advanced" aria-label="MX-H2I advanced options">
+      <header class="phone-bar" data-window-drag="true">
+        <button class="icon-button" type="button" data-action="phone-back" aria-label="Back">‹</button>
+        ${renderPhoneShellMenu('h2i')}
+      </header>
+      <section class="advanced-title">
+        <p class="kicker">MX-H2I</p>
+        <h1>高级选项</h1>
+        <p>Launcher Foundation / endpoint / release</p>
+      </section>
+      ${renderFeedback()}
+      ${renderNetworkOperationControl()}
+      <section class="advanced-list">
+        ${renderAdvancedRow('指纹、人脸与密码', 'identity / device binding', '◎')}
+        ${renderAdvancedRow('安全', 'permission broker / helper policy', '◆')}
+        ${renderAdvancedRow('隐私保护', 'audit scope / token isolation', '◇')}
+        ${renderAdvancedRow('应用设置', 'AppCenter / H2O embed defaults', '⚙')}
+        ${renderAdvancedRow('更多设置', 'network, release, diagnostics', '…')}
+      </section>
+      ${renderAnonymousAccessPanel()}
+      ${renderInstallationIdentityPanel()}
+      ${renderWindowsOwnershipRecoveryPanel()}
+      ${renderDiagnosticLogPanel()}
+      ${renderWireGuardDiagnostics()}
+      ${renderConfigForm()}
+    </section>
+  `;
+}
+
+function renderAnonymousAccessPanel() {
+  if (!shouldRenderAnonymousAccessPanel()) return '';
+  const connection = state.connection || {};
+  const guestActive = isGuestConnectionActive();
+  const connected = guestActive && connection.state === 'connected';
+  const disconnectable = connected || isGuestTunnelActive(connection);
+  const connecting = !networkOperationPaused() && (
+    networkOperationBlocksMutation()
+    || busyAction === 'connectGuest'
+    || (guestActive && connection.state === 'connecting')
+  );
+  const retainedGuest = guestActive
+    && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
+  const disconnecting = busyAction === 'disconnect';
+  const cleaning = busyAction === 'resetLocalNetworkIdentity';
+  const policy = anonymousEnrollmentPolicy();
+  const policyBlocked = anonymousRecoveryBlockedByPolicy(connection);
+  const enrollmentAllowed = retainedGuest
+    ? canRenewAnonymousEnrollment()
+    : canStartAnonymousEnrollment();
+  const employeeActive = connection.mode === 'employee'
+    && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable'].includes(connection.state);
+  const status = connected
+    ? 'connected'
+    : connecting
+      ? 'connecting'
+      : policyBlocked
+        ? 'blocked'
+      : retainedGuest
+        ? 'reserved'
+        : policy === 'disabled'
+          ? 'blocked'
+          : policy === 'drain'
+            ? 'reserved'
+            : 'idle';
+  const statusLabel = connected
+    ? '已连接'
+    : connecting
+      ? '连接中'
+      : policyBlocked
+        ? '已停用'
+      : retainedGuest
+        ? '待恢复'
+        : policy === 'disabled'
+          ? '已停用'
+          : policy === 'drain'
+            ? '仅已有连接续租'
+            : employeeActive
+              ? '员工模式使用中'
+              : '未连接';
+  const action = disconnectable ? 'disconnect' : 'connectGuest';
+  const actionLabel = disconnecting
+    ? '正在断开匿名连接'
+    : disconnectable
+      ? '断开匿名连接'
+      : connecting
+        ? pendingConnectionLabel()
+        : policyBlocked
+          ? '匿名登录已禁止'
+        : retainedGuest && !enrollmentAllowed
+          ? '匿名续租已停用'
+          : retainedGuest
+            ? retainedConnectionActionLabel(connection)
+            : policy === 'disabled'
+              ? '匿名连接已停用'
+              : policy === 'drain'
+                ? '不接受新匿名连接'
+                : '连接匿名模式';
+  const actionDisabled = connecting
+    || disconnecting
+    || cleaning
+    || employeeActive
+    || (!disconnectable && !enrollmentAllowed);
+  return `
+    <section class="settings-panel anonymous-access-panel" data-state="${escapeAttr(status)}">
+      <div class="panel-head">
+        <div>
+          <h2>匿名连接</h2>
+          <p>${escapeHtml(anonymousPolicyMessage())}</p>
+        </div>
+        <span class="status-pill" data-state="${escapeAttr(status)}">${escapeHtml(statusLabel)}</span>
+      </div>
+      ${employeeActive ? '<p class="anonymous-access-note">员工网络正在使用中。为避免影响现有员工连接，请先从主界面明确断开员工模式。</p>' : ''}
+      ${guestActive && connection.localIp ? `<div class="anonymous-access-address"><span>访客 IP</span><strong>${escapeHtml(connection.localIp)}</strong></div>` : ''}
+      ${renderConnectionRecoverySteps(retainedGuest)}
+      <div class="anonymous-access-actions">
+        <button class="${disconnectable || !enrollmentAllowed ? 'secondary-button' : 'primary-button'} block-button" type="button" data-action="${action}" aria-busy="${connecting || disconnecting ? 'true' : 'false'}" ${actionDisabled ? 'disabled' : ''}>
+          ${escapeHtml(actionLabel)}
+        </button>
+        ${retainedGuest ? `
+          <button class="secondary-button block-button" type="button" data-action="resetLocalNetworkIdentity" ${connecting || disconnecting || cleaning || disconnectable ? 'disabled' : ''}>
+            ${cleaning ? '正在清理旧连接' : disconnectable ? '请先断开匿名连接' : '清理旧连接'}
+          </button>
+        ` : ''}
+      </div>
+    </section>
+  `;
+}
+
+function renderInstallationIdentityPanel() {
+  const installation = state.installation || {};
+  const installId = installation.installId || '-';
+  const deviceId = installation.deviceId || '-';
+  return `
+    <section class="settings-panel installation-identity-panel">
+      <div class="panel-head">
+        <div>
+          <h2>本机身份</h2>
+          <p>Release Center 定向灰度使用 installId；deviceId 用于设备排查。</p>
+        </div>
+        <span class="status-pill" data-state="${installId === '-' ? 'idle' : 'ready'}">${installId === '-' ? 'PENDING' : 'READY'}</span>
+      </div>
+      <div class="identity-field-list">
+        ${renderIdentityField('installId', installId, true)}
+        ${renderIdentityField('deviceId', deviceId)}
+      </div>
+      <p class="identity-hint">在 k8s admin 的 Release Center 里，把 installId 填到 Target installs，就能只给这台 MX-H2I 做热更新 canary。</p>
+    </section>
+  `;
+}
+
+function renderIdentityField(label, value, copyable = false) {
+  const empty = !value || value === '-';
+  return `
+    <div class="identity-field">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || '-')}</strong>
+      ${copyable ? `<button class="text-button" type="button" data-action="copy-install-id" ${empty ? 'disabled' : ''}>复制</button>` : ''}
+    </div>
+  `;
+}
+
+function renderPhoneShellMenu(activeTarget) {
+  const connected = state.connection?.state === 'connected';
+  const appCenterInstalled = state.apps?.appcenter?.installed;
+  return `
+    <div class="phone-shell-menu">
+      <button class="window-dots" type="button" data-action="toggle-phone-menu" aria-label="App menu">
+        <span></span><span></span><span></span>
+      </button>
+      ${phoneMenuOpen ? `
+        <div class="phone-shell-popover" role="menu">
+          <button type="button" data-action="switch-phone-shell" data-target="h2i" class="${activeTarget === 'h2i' ? 'is-active' : ''}">
+            <span>H2I（VPN）</span>
+            <small>连接与身份</small>
+          </button>
+          <button type="button" data-action="switch-phone-shell" data-target="appcenter" ${!connected && !appCenterInstalled ? 'disabled' : ''}>
+            <span>AppCenter</span>
+            <small>${appCenterInstalled ? '应用中心' : '连接后安装'}</small>
+          </button>
+          <button type="button" data-action="switch-phone-shell" data-target="close">
+            <span>关闭</span>
+            <small>关闭当前窗口</small>
+          </button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function renderAdvancedRow(title, detail, icon) {
+  return `
+    <button class="advanced-row" type="button">
+      <span class="advanced-row__icon">${escapeHtml(icon)}</span>
+      <span>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(detail)}</small>
+      </span>
+      <span class="advanced-row__arrow">›</span>
+    </button>
+  `;
+}
+
+function renderWindowsOwnershipRecoveryPanel() {
+  if (!isWindows) return '';
+  const recovery = state.connection?.diagnostics?.windowsOwnershipRecovery
+    || state.connection?.diagnostics?.networkEnvironment?.windowsOwnershipRecovery;
+  const blocked = Boolean(busyAction) || networkOperationBlocksMutation();
+  const connected = state.connection?.state === 'connected';
+  return `
+    <section class="settings-panel" aria-label="Windows 网络恢复">
+      <div class="panel-head"><div><h2>网络恢复 · 保留登录</h2><p>清理历史安装身份留下的网络占用</p></div></div>
+      <p class="diagnostic-log-hint">仅在 WireGuard 已停止、网卡地址已释放且没有其他 MX-H2I 实例时清理。保留员工登录、设备密钥、租约和其他产品的网络配置。</p>
+      <p class="diagnostic-note" role="status">${escapeHtml(recovery?.message || '连接前会自动检查冲突。也可以先刷新诊断，再清理残留声明。')}</p>
+      ${recovery?.lastRepair?.removedOwnerIds?.length ? `<p class="diagnostic-note">最近已清理 ${recovery.lastRepair.removedOwnerIds.length} 条残留声明，并保存恢复前备份。</p>` : ''}
+      <div class="toolbar-actions">
+        <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${blocked ? 'disabled' : ''}>刷新诊断</button>
+        <button class="secondary-button" type="button" data-action="repairNetworkOwnership" ${blocked || connected ? 'disabled' : ''}>${busyAction === 'repairNetworkOwnership' ? '正在检查并清理' : '清理残留网络声明'}</button>
+      </div>
+      <p class="diagnostic-log-hint">${connected ? '当前已连接，无需清理。' : '若提示隧道仍运行，请先正常断开，再执行清理；完成后使用原员工身份连接。'}</p>
+    </section>
+  `;
+}
+
+function renderDiagnosticLogPanel() {
+  const log = state.diagnosticLog || {};
+  const recent = Array.isArray(log.recent) ? log.recent : [];
+  const notable = recent.filter((entry) => entry?.level === 'error' || entry?.level === 'warning').slice(0, 5);
+  const windowsNrpt = state.connection?.diagnostics?.networkEnvironment?.windowsNrpt;
+  const nrptSummary = windowsNrpt
+    ? `Windows NRPT：${windowsNrpt.state || 'unknown'}`
+    : 'Windows 导出包会额外采集 NRPT、网卡 DNS、ipconfig 和路由。';
+  return `
+    <section class="settings-panel diagnostic-log-panel">
+      <div class="panel-head">
+        <div>
+          <h2>运行日志与诊断包</h2>
+          <p>异步滚动日志 / Windows DNS & NRPT</p>
+        </div>
+        <span class="status-pill" data-state="${log.enabled === false ? 'failed' : 'ready'}">${log.enabled === false ? 'OFF' : 'ON'}</span>
+      </div>
+      <p class="diagnostic-log-hint">${escapeHtml(nrptSummary)} 日志达到 ${escapeHtml(formatBytes(log.maxBytes || 2 * 1024 * 1024))} 后自动轮转，不阻塞连接主流程。</p>
+      <div class="diagnostic-log-list">
+        ${notable.length ? notable.map((entry) => `
+          <div class="diagnostic-log-row" data-level="${escapeAttr(entry.level)}">
+            <span>${escapeHtml(entry.level)}</span>
+            <div>
+              <strong>${escapeHtml(entry.event || 'runtime')}</strong>
+              <p>${escapeHtml(entry.message || '')}</p>
+              <small>${escapeHtml(formatDateTime(entry.at))}</small>
+            </div>
+          </div>
+        `).join('') : '<p class="empty">当前会话暂无 warning / error。</p>'}
+      </div>
+      <div class="toolbar-actions diagnostic-log-actions">
+        <button class="secondary-button" type="button" data-action="openDiagnosticLogs" ${busyAction === 'openDiagnosticLogs' ? 'disabled' : ''}>打开日志目录</button>
+        <button class="primary-button" type="button" data-action="exportDiagnostics" ${busyAction === 'exportDiagnostics' ? 'disabled' : ''}>${busyAction === 'exportDiagnostics' ? '正在采集…' : '导出诊断包'}</button>
+      </div>
+      <p class="diagnostic-log-privacy">诊断包可能包含本机 IP、网卡、DNS 后缀和路由信息；常见 token、密码、私钥字段会自动隐藏。</p>
+    </section>
+  `;
+}
+
+function updateStatusLabel(status) {
+  if (status === 'update-available') return 'UPDATE';
+  if (status === 'blocked') return 'BLOCKED';
+  if (status === 'downloading') return 'DOWNLOADING';
+  if (status === 'ready-to-install') return 'READY';
+  if (status === 'installer-opened') return 'INSTALL';
+  if (status === 'staged') return 'STAGED';
+  if (status === 'download-failed' || status === 'failed') return 'FAILED';
+  if (status === 'needs-connection') return 'LOGIN';
+  if (status === 'up-to-date') return 'LATEST';
+  return status || 'READY';
+}
+
+function updateSummaryText(update) {
+  if (!isInternalConnected()) return '连接 Internal 后自动检查 Release Center';
+  if (update.status === 'downloading') return '正在下载并校验 artifact';
+  if (update.installerOpenError) return `安装包已下载，但打开失败：${update.installerOpenError}`;
+  if (update.status === 'installer-opened') return '安装包已打开，完成安装后可重启';
+  if (update.status === 'ready-to-install') return '安装包已下载，可打开安装器';
+  if (update.status === 'staged') return update.restartRequired ? '热更新已暂存，等待重启激活' : '热更新已暂存';
+  if (update.status === 'blocked') return '发现新版本，等待 Release Gate';
+  if (update.status === 'update-available') return update.activation === 'installer-manual' ? '发现大版本安装包' : '发现可自动更新版本';
+  if (update.lastCheckedAt) return `上次检查 ${formatDateTime(update.lastCheckedAt)}`;
+  return '尚未检查更新';
+}
+
+function updateReleaseNotesPreview(update, maxLength = 360) {
+  const notes = String(update?.releaseNotes || '').replace(/\r\n/g, '\n').trim();
+  if (!notes) return '';
+  if (notes.length <= maxLength) return notes;
+  return `${notes.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function updateApplyLabel(update) {
+  if (busyAction === 'applyUpdate' || update.status === 'downloading') return '下载中';
+  if (update.status === 'ready-to-install' && update.installerOpenError) return '重新打开';
+  if (update.status === 'ready-to-install') return '打开安装包';
+  if (update.status === 'installer-opened') return '已打开';
+  if (update.status === 'staged') return update.restartRequired ? '等待重启' : '已暂存';
+  if (update.status === 'download-failed') return '重新下载';
+  if (update.activation === 'installer-manual' || update.majorUpdateRequiresInstaller) return '下载大版本';
+  return '下载更新';
+}
+
+function updateDeliveryLabel(deliveryMode) {
+  if (deliveryMode === 'silent-download-next-start') return '静默 / 下次启动';
+  if (deliveryMode === 'manual-download') return '红点 / 手动下载';
+  return '弹窗 / 立即处理';
+}
+
+function renderUpdateProgress(update) {
+  const progress = update.downloadProgress || null;
+  if (!progress || !['downloading', 'downloaded', 'failed'].includes(progress.state)) return '';
+  const percent = Number.isFinite(progress.percent) ? progress.percent : null;
+  const width = percent == null ? 18 : Math.max(2, Math.min(100, percent));
+  return `
+    <div class="update-progress" data-state="${escapeAttr(progress.state)}">
+      <div class="update-progress-track"><span style="width:${escapeAttr(String(width))}%"></span></div>
+      <p>${escapeHtml(progressLabel(progress))}</p>
+    </div>
+  `;
+}
+
+function progressLabel(progress) {
+  const bytes = formatBytes(progress.bytes);
+  const total = progress.totalBytes ? formatBytes(progress.totalBytes) : '';
+  const percent = Number.isFinite(progress.percent) ? `${progress.percent}%` : '下载中';
+  if (progress.state === 'failed') return `下载失败 · ${bytes}${total ? ` / ${total}` : ''}`;
+  if (progress.state === 'downloaded') return `已下载 · ${bytes}`;
+  return `${percent} · ${bytes}${total ? ` / ${total}` : ''}`;
+}
+
+function renderReleaseHistory(update) {
+  const releases = (Array.isArray(update.availableReleases) ? update.availableReleases : [])
+    .filter((item) => item?.version || item?.releaseId)
+    .slice(0, 8);
+  return `
+    <div class="update-mini-list">
+      <div class="update-mini-list-head">
+        <strong>大版本与回退</strong>
+        <span>${escapeHtml(releases.length ? `${releases.length} 个可安装版本` : '暂无版本')}</span>
+      </div>
+      ${releases.length ? releases.map((item) => `
+        <div class="update-mini-row">
+          <div>
+            <strong>${escapeHtml(item.version || item.releaseId)}</strong>
+            <small>${escapeHtml([
+              [item.platform, item.arch].filter(Boolean).join('/'),
+              formatBytes(item.sizeBytes),
+              formatDateTime(item.createdAt)
+            ].filter((value) => value && value !== '-').join(' · '))}</small>
+          </div>
+          <div class="update-mini-row-actions">
+            <span>${escapeHtml(item.version === update.currentVersion ? '当前版本' : item.status || item.gate || '-')}</span>
+            ${item.artifactUrl ? `
+              <button class="secondary-button" type="button" data-action="installRelease" data-release-id="${escapeAttr(item.id || item.releaseId || item.planId)}" ${busyAction ? 'disabled' : ''}>
+                ${escapeHtml(releaseInstallLabel(item.version, update.currentVersion))}
+              </button>
+            ` : ''}
+          </div>
+        </div>
+      `).join('') : '<p class="update-mini-empty">尚无适用于本机平台和架构的已发布安装包。</p>'}
+    </div>
+  `;
+}
+
+function releaseInstallLabel(version, currentVersion) {
+  const comparison = compareReleaseVersions(version, currentVersion);
+  if (comparison < 0) return '回退';
+  if (comparison === 0) return '重装';
+  return '安装';
+}
+
+function compareReleaseVersions(left, right) {
+  const leftParts = String(left || '').split(/[.+-]/).slice(0, 3).map((value) => Number(value));
+  const rightParts = String(right || '').split(/[.+-]/).slice(0, 3).map((value) => Number(value));
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (Number.isFinite(leftParts[index]) ? leftParts[index] : 0)
+      - (Number.isFinite(rightParts[index]) ? rightParts[index] : 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+function renderRollbackSlots(update) {
+  const slots = Array.isArray(update.rollbackSlots) ? update.rollbackSlots.slice(0, 3) : [];
+  if (!slots.length) return '';
+  return `
+    <div class="rollback-slots">
+      <div class="update-mini-list-head">
+        <strong>可回滚大版本</strong>
+        <span>最近 ${escapeHtml(String(slots.length))} 个</span>
+      </div>
+      ${slots.map((slot) => `
+        <div class="rollback-row">
+          <div>
+            <strong>${escapeHtml(slot.version || slot.releaseId || 'installer')}</strong>
+            <small>${escapeHtml(`${formatBytes(slot.sizeBytes)} · ${formatDateTime(slot.downloadedAt)}`)}</small>
+          </div>
+          <button class="secondary-button" type="button" data-action="openRollback" data-rollback-id="${escapeAttr(slot.id || slot.artifactId || slot.path)}">打开</button>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderConnectionStrip() {
+  const connection = state.connection || {};
+  const health = connection.health || {};
+  return `
+    <section class="connection-strip">
+      <div>
+        <span>本机 IP</span>
+        <strong>${escapeHtml(connection.localIp || '未分配')}</strong>
+      </div>
+      <div>
+        <span>Channel</span>
+        <strong>mx-h2i</strong>
+      </div>
+      <div>
+        <span>Internal</span>
+        <strong>${escapeHtml(health.internalApi || 'idle')}</strong>
+      </div>
+    </section>
+  `;
+}
+
+function renderWireGuardDiagnostics() {
+  const connection = state.connection || {};
+  const wireGuard = connection.wireGuard || {};
+  const diagnostics = connection.diagnostics || {};
+  const route = diagnostics.route || {};
+  const endpointRoute = diagnostics.endpointRoute || {};
+  const internalApi = diagnostics.internalApi || {};
+  const directSync = diagnostics.internalDirectPeerSync || {};
+  const peerSync = connection.domesticPeerSync || diagnostics.domesticPeerSync || {};
+  const relayDiag = diagnostics.domesticRelayDiagnostics || {};
+  const relaySummary = relayDiag.summary || {};
+  const relayBlockedReasons = Array.isArray(relayDiag.blockedReasons) ? relayDiag.blockedReasons : [];
+  const relayFailures = Array.isArray(relayDiag.failures) ? relayDiag.failures : [];
+  const directSyncFailures = directSync.status === 'skipped' ? [] : (Array.isArray(directSync.failures) ? directSync.failures : []);
+  const directSyncStatus = directSync.status === 'skipped' && directSync.message ? 'relay fallback' : (directSync.status || '-');
+  const networkEnvironment = diagnostics.networkEnvironment || {};
+  const resolution = networkEnvironment.resolution || {};
+  const resolutionAddresses = Array.isArray(resolution.addresses)
+    ? resolution.addresses.map((row) => `${row.address || '-'} ${row.classification || ''}`.trim()).join(', ')
+    : '';
+  const systemProxy = networkEnvironment.systemDomainProxy || diagnostics.systemDomainProxy || {};
+  const launchDaemon = wireGuard.launchDaemon || {};
+  const launchDaemonStatus = launchDaemon.supported
+    ? (launchDaemon.running ? 'running' : launchDaemon.loaded ? 'loaded' : launchDaemon.installed ? 'installed' : 'missing')
+    : '-';
+  return `
+    <section class="settings-panel">
+      <div class="panel-head">
+        <div>
+          <h2>WireGuard 诊断</h2>
+          <p>route proof / overlay health</p>
+        </div>
+        <div class="toolbar-actions">
+          ${anonymousRecoveryBlockedByPolicy() ? '' : `
+            <button class="secondary-button" type="button" data-action="repairSystemNetwork" ${busyAction === 'repairSystemNetwork' || networkOperationBlocksMutation() ? 'disabled' : ''}>修复网络</button>
+            <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${busyAction === 'refreshDiagnostics' || networkOperationBlocksMutation() ? 'disabled' : ''}>重新诊断</button>
+          `}
+        </div>
+      </div>
+      <div class="metric-grid">
+        ${metric('WG', connection.health?.wireGuard || 'idle')}
+        ${metric('Path', pathLabel(wireGuard.path || connection.routePlan?.preferredPath))}
+        ${metric('DNS Phase', networkEnvironment.phase || '-')}
+        ${metric('DNS Host', networkEnvironment.host || '-')}
+        ${metric('Resolved', compactText(resolutionAddresses, 90))}
+        ${metric('Resolution', resolution.state ? `${resolution.state} / ${resolution.severity || '-'}` : '-')}
+        ${metric('System PAC', systemProxy.applied ? `on / ${systemProxy.systemResolverMode || '-'}` : 'off')}
+        ${metric('Direct Sync', directSyncStatus)}
+        ${metric('Peer Sync', peerSync.status || '-')}
+        ${metric('Relay', relayDiag.status || '-')}
+        ${metric('IP Forward', relaySummary.ipForward || '-')}
+        ${metric('Relay FORWARD', relaySummary.firewallForward || '-')}
+        ${metric('Relay Docker', relaySummary.firewallDockerUser || '-')}
+        ${metric('Interface', wireGuard.realInterfaceName || wireGuard.interfaceName || '-')}
+        ${metric('Expected', route.expectedInterfaceName || wireGuard.realInterfaceName || '-')}
+        ${metric('Endpoint', wireGuard.endpoint || connection.domesticRelayEndpoint || '-')}
+        ${metric('Endpoint route', endpointRoute.interfaceName ? `${endpointRoute.interfaceName}${endpointRoute.gateway ? ` / ${endpointRoute.gateway}` : ''}` : (endpointRoute.error || '-'))}
+        ${metric('Endpoint proxy', endpointRoute.viaProxyTun ? 'proxy-tun' : (endpointRoute.ok ? 'clear' : '-'))}
+        ${metric('Target', route.targetIp || '10.88.88.88')}
+        ${metric('Route dev', route.interfaceName || '-')}
+        ${metric('Service', wireGuard.serviceState || (wireGuard.active ? 'active' : '-'))}
+        ${metric('LaunchDaemon', launchDaemonStatus)}
+        ${metric('Internal', internalApi.ok ? 'ready' : (internalApi.error || connection.health?.internalApi || 'idle'))}
+        ${metric('Relay to lease', relaySummary.routeToLease || '-')}
+        ${metric('Relay client', relaySummary.clientPeerConfigured ? `${relaySummary.clientPeerConfigured} / ${relaySummary.clientLatestHandshake || '-'} / ${relaySummary.clientTransfer || '-'}` : '-')}
+        ${metric('Relay Internal', relaySummary.internalPeerConfigured ? `${relaySummary.internalPeerConfigured} / ${relaySummary.internalLatestHandshake || '-'} / ${relaySummary.internalTransfer || '-'}` : '-')}
+        ${metric('Relay healthz', relaySummary.internalHealthz || '-')}
+        ${metric('AllowedIPs', compactList(wireGuard.allowedIps))}
+        ${metric('Route CIDRs', compactList(connection.routeCidrs))}
+        ${metric('Config', wireGuard.configPath || '-')}
+      </div>
+      ${directSync.message ? `<p class="diagnostic-note">${escapeHtml(directSync.message)}</p>` : ''}
+      ${directSyncFailures.length ? `<p class="diagnostic-note">${escapeHtml(directSyncFailures.join(' / '))}</p>` : ''}
+      ${peerSync.failures?.length ? `<p class="diagnostic-note">${escapeHtml(peerSync.failures.join(' / '))}</p>` : ''}
+      ${relayBlockedReasons.length || relayFailures.length ? `<p class="diagnostic-note">${escapeHtml([...relayBlockedReasons, ...relayFailures].join(' / '))}</p>` : ''}
+      ${wireGuard.statusError || wireGuard.routeLogTail ? `<p class="diagnostic-note">${escapeHtml(wireGuard.statusError || wireGuard.routeLogTail)}</p>` : ''}
+      ${resolution.message ? `<p class="diagnostic-note">${escapeHtml(resolution.message)}</p>` : ''}
+    </section>
+  `;
+}
+
+function renderConfigForm() {
+  const config = state.config || {};
+  return `
+    <form class="settings-panel" data-form-action="save-config">
+      <div class="panel-head">
+        <div>
+          <h2>运行配置</h2>
+          <p>endpoint injection</p>
+        </div>
+        <button class="secondary-button" type="submit" ${busyAction === 'save-config' ? 'disabled' : ''}>保存</button>
+      </div>
+      <label class="field">
+        <span>Bootstrap API</span>
+        <input name="bootstrapApiBaseUrl" value="${escapeAttr(config.bootstrapApiBaseUrl || '')}" />
+      </label>
+      <label class="field">
+        <span>Overlay Internal API</span>
+        <input name="internalApiBaseUrl" value="${escapeAttr(config.internalApiBaseUrl)}" />
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span>Domestic Host</span>
+          <input name="domesticRelayHost" value="${escapeAttr(config.domesticRelayHost)}" />
+        </label>
+        <label class="field compact">
+          <span>UDP</span>
+          <input name="domesticRelayPort" inputmode="numeric" value="${escapeAttr(String(config.domesticRelayPort || ''))}" />
+        </label>
+      </div>
+      <label class="field">
+        <span>SDK Gateway</span>
+        <input name="sdkGatewayBaseUrl" value="${escapeAttr(config.sdkGatewayBaseUrl)}" />
+      </label>
+      <label class="field">
+        <span>Host Resolve</span>
+        <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="h2i.minsight-ai.com=<gateway-ip>" />
+      </label>
+      <label class="field">
+        <span>Bootstrap DNS</span>
+        <select name="bootstrapResolveMode">
+          ${option('env-first', config.bootstrapResolveMode)}
+          ${option('dns-first', config.bootstrapResolveMode)}
+          ${option('env-only', config.bootstrapResolveMode)}
+          ${option('dns-only', config.bootstrapResolveMode)}
+        </select>
+      </label>
+      <label class="field">
+        <span>Bootstrap DNS Servers</span>
+        <input name="bootstrapDnsServers" value="${escapeAttr(config.bootstrapDnsServers || '')}" placeholder="223.5.5.5, 119.29.29.29" />
+      </label>
+      <label class="field">
+        <span>WG Path</span>
+        <select name="routePathPreference">
+          ${option('auto', config.routePathPreference)}
+          ${option('hybrid', config.routePathPreference)}
+          ${option('direct', config.routePathPreference)}
+          ${option('relay', config.routePathPreference)}
+        </select>
+      </label>
+      <label class="field">
+        <span>Split DNS Domains</span>
+        <input name="splitDnsDomains" value="${escapeAttr(config.splitDnsDomains || '')}" placeholder="mxinfo-inc.cn, h2i.mxinfo-inc.cn" />
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span>Channel</span>
+          <select name="releaseChannel">
+            ${option('stable', config.releaseChannel)}
+            ${option('beta', config.releaseChannel)}
+            ${option('internal', config.releaseChannel)}
+          </select>
+        </label>
+        <label class="field">
+          <span>Gray</span>
+          <input name="rolloutGroup" value="${escapeAttr(config.rolloutGroup)}" />
+        </label>
+      </div>
+      <label class="field">
+        <span>应用更新方案</span>
+        <select name="releaseUpdateStrategy">
+          ${option('asar', config.releaseUpdateStrategy)}
+          ${option('installer', config.releaseUpdateStrategy)}
+        </select>
+        <small>Release Center 决定本次使用 ASAR 还是 DMG/EXE；本机默认按全量安装包优先兼容旧策略。</small>
+      </label>
+      <label class="check-row">
+        <input name="useLocalEngineResources" type="checkbox" ${config.useLocalEngineResources ? 'checked' : ''} />
+        <span>使用本地引擎资源</span>
+      </label>
+      <label class="check-row">
+        <input name="restartAfterCodeUpdate" type="checkbox" ${config.restartAfterCodeUpdate ? 'checked' : ''} />
+        <span>代码更新后自动重启</span>
+      </label>
+    </form>
+  `;
+}
+
+function renderWorkbench(connected, connecting) {
+  const contract = state.launcherContract || {};
+  const foundation = contract.foundation || {};
+  return `
+    <section class="mx-workbench">
+      ${screen === 'appcenter' ? renderAppShellBar('AppCenter', connected ? 'MX-H2I 已连接' : '等待 MX-H2I 连接', 'appcenter') : ''}
+      ${renderFoundationDrawer(contract, foundation)}
+
+      ${screen === 'appcenter' ? renderAppCenterView(connected) : renderLauncherView(connected, connecting)}
+    </section>
+  `;
+}
+
+function renderFoundationDrawer(contract, foundation) {
+  const feedback = state.feedback?.message || '';
+  const subject = state.connection?.subject || 'no active subject';
+  const summary = feedback || `${state.connection?.state || 'idle'} / ${state.connection?.localIp || 'no lease'} / ${subject}`;
+  return `
+    <section class="foundation-drawer ${foundationOpen ? 'is-open' : ''}">
+      <button class="foundation-toggle" type="button" data-action="toggle-foundation-panel">
+        <span class="foundation-toggle-copy">
+          <strong>MX-H2I Launcher Foundation</strong>
+          <small>${escapeHtml(summary)}</small>
+        </span>
+        <span class="foundation-toggle-state">${foundationOpen ? '收起' : '展开'} <b>${foundationOpen ? '⌃' : '⌄'}</b></span>
+      </button>
+      ${foundationOpen ? renderFoundationDetails(contract, foundation) : ''}
+    </section>
+  `;
+}
+
+function renderFoundationDetails(contract, foundation) {
+  return `
+    <div class="foundation-content">
+      ${renderFeedback()}
+      <section class="workbench-grid">
+        <section class="panel foundation-panel">
+          <div class="panel-head">
+            <div>
+              <h3>Standalone owners</h3>
+              <p>launcher 底座可被平级产品引用</p>
+            </div>
+            <span class="tag">${escapeHtml(contract.available ? 'sdk loaded' : 'sdk pending')}</span>
+          </div>
+          <div class="owner-list">
+            ${(foundation.standaloneOwners || []).map(renderOwner).join('')}
+          </div>
+          <div class="capability-row">
+            ${(foundation.sharedCapabilities || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+          </div>
+        </section>
+
+        <section class="panel runtime-panel">
+          <div class="panel-head">
+            <div>
+              <h3>Runtime</h3>
+              <p>${escapeHtml(state.connection?.subject || 'no active subject')}</p>
+            </div>
+            <span class="status-pill" data-state="${escapeAttr(state.connection?.state || 'idle')}">${escapeHtml(state.connection?.state || 'idle')}</span>
+          </div>
+          <div class="metric-grid">
+            ${metric('Base URL', state.config?.internalApiBaseUrl)}
+            ${metric('Relay', `${state.config?.domesticRelayHost}:${state.config?.domesticRelayPort}`)}
+            ${metric('Local IP', state.connection?.localIp || '-')}
+            ${metric('Route', state.connection?.routePolicy || '-')}
+          </div>
+        </section>
+      </section>
+    </div>
+  `;
+}
+
+function renderAppShellBar(title, subtitle, activeTarget) {
+  return `
+    <header class="app-shell-bar" data-window-drag="true">
+      <div class="app-shell-identity">
+        <img class="brand-logo app-shell-mark" src="./assets/mingxi-logo.png" alt="" aria-hidden="true" draggable="false" />
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(subtitle)}</span>
+        </div>
+      </div>
+      <div class="app-shell-actions">
+        <button class="app-window-button" type="button" data-window-control="minimize" aria-label="Minimize">-</button>
+        <button class="app-window-button" type="button" data-window-control="zoom" aria-label="Zoom">□</button>
+        <div class="app-shell-menu">
+          <button class="app-window-button" type="button" data-action="toggle-app-shell-menu" aria-label="App menu">...</button>
+          ${appShellMenuOpen ? `
+            <div class="app-shell-popover" role="menu">
+              <button type="button" data-action="switch-app-shell" data-target="h2i" class="${activeTarget === 'h2i' ? 'is-active' : ''}">
+                <span>H2I（VPN）</span>
+                <small>返回连接面板</small>
+              </button>
+              <button type="button" data-action="switch-app-shell" data-target="appcenter" class="${activeTarget === 'appcenter' ? 'is-active' : ''}">
+                <span>AppCenter</span>
+                <small>应用中心</small>
+              </button>
+              <button type="button" data-action="switch-app-shell" data-target="close">
+                <span>关闭</span>
+                <small>关闭当前应用</small>
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    </header>
+  `;
+}
+
+function renderLauncherView(connected, connecting) {
+  const appCenterInstalled = state.apps?.appcenter?.installed;
+  return `
+    <section class="panel app-registry-panel">
+      <div class="panel-head">
+        <div>
+          <p class="kicker">APPLICATIONS</p>
+          <h3>Launcher app registry</h3>
+        </div>
+        <button class="primary-button" type="button" data-action="${appCenterInstalled ? 'show-appcenter' : 'installAppCenter'}" ${!connected || busyAction === 'installAppCenter' ? 'disabled' : ''}>
+          ${appCenterInstalled ? 'Open AppCenter' : 'Install AppCenter'}
+        </button>
+      </div>
+      <div class="app-grid">
+        ${renderAppCard(state.apps?.appcenter, {
+          action: appCenterInstalled ? 'show-appcenter' : 'installAppCenter',
+          actionLabel: appCenterInstalled ? 'Open' : 'Install',
+          disabled: !connected || connecting
+        })}
+        ${renderAppCard(state.apps?.h2o, {
+          action: 'enableH2o',
+          actionLabel: state.apps?.h2o?.enabled ? 'Enabled' : 'Enable',
+          disabled: !state.apps?.appcenter?.installed || state.apps?.h2o?.enabled
+        })}
+      </div>
+    </section>
+    ${renderUpdatePanel()}
+  `;
+}
+
+function renderAppCenterView(connected) {
+  const apps = appCatalog();
+  const categories = appCenterCategories(apps);
+  if (!categories.some((item) => item.id === appCategory)) appCategory = 'all';
+  const visibleApps = filteredAppCatalog(apps);
+  if (!apps.some((app) => app.appId === selectedAppId)) selectedAppId = apps[0]?.appId || 'h2o';
+  const h2o = apps.find((app) => app.appId === 'h2o');
+  const route = appCenterRoute === 'h2o' && h2o ? 'h2o' : 'catalog';
+  const selected = route === 'h2o' ? h2o : apps.find((app) => app.appId === selectedAppId) || visibleApps[0] || apps[0] || null;
+  const hasError = apps.some((app) => appNeedsAttention(app));
+  return `
+    <section class="appcenter-window appcenter-product ${route === 'h2o' ? 'is-app-managing' : ''} ${appDebugOpen ? 'is-debug-open' : ''} ${appInspectorCollapsed ? 'is-inspector-collapsed' : ''}">
+      ${route === 'h2o' ? '' : `<aside class="appcenter-rail">
+        <div class="appcenter-account">
+          <div class="avatar-mark">${escapeHtml((state.identity?.displayName || 'V').slice(0, 1))}</div>
+          <div>
+            <strong>${escapeHtml(state.identity?.displayName || 'Visitor')}</strong>
+            <span>${escapeHtml(state.identity?.account || 'MX-H2I workspace')}</span>
+          </div>
+        </div>
+        <nav class="appcenter-nav" aria-label="AppCenter sections">
+          ${categories.map((item) => `
+            <button class="${appCategory === item.id ? 'is-active' : ''}" type="button" data-action="set-app-category" data-category="${escapeAttr(item.id)}">
+              <span>${escapeHtml(item.label)}</span>
+              <small>${escapeHtml(String(item.count))}</small>
+            </button>
+          `).join('')}
+        </nav>
+        <div class="appcenter-rail-foot">
+          <button class="text-button" type="button" data-action="toggle-app-debug">${appDebugOpen ? '隐藏 Debug' : 'Debug'}</button>
+          <span>${escapeHtml(hasError ? '有应用需要处理' : '所有应用正常')}</span>
+        </div>
+      </aside>`}
+
+      <section class="appcenter-main ${route === 'h2o' ? 'is-h2o-manager' : ''}">
+        <header class="appcenter-titlebar">
+          <div>
+            <p class="kicker">${route === 'h2o' ? 'APPCENTER / H2O' : 'APPCENTER'}</p>
+            <h3>${route === 'h2o' ? 'H2O 管理' : '应用中心'}</h3>
+            <span>${escapeHtml(route === 'h2o'
+              ? 'Home To Oversea 通过 MX-H2I broker-session 托管出海策略'
+              : connected ? 'MX-H2I 已连接，可以安装和打开应用' : '连接 MX-H2I 后可安装应用')}</span>
+          </div>
+          <div class="toolbar-actions">
+            ${route === 'h2o' ? '<button class="secondary-button" type="button" data-action="show-app-catalog">返回市场</button>' : ''}
+            <button class="secondary-button" type="button" data-action="toggle-app-debug">${appDebugOpen ? '关闭 Debug' : 'Debug'}</button>
+            ${renderCheckUpdatesButton('primary-button')}
+          </div>
+        </header>
+
+        ${hasError ? renderAppCenterErrorBanner(apps) : ''}
+
+        ${route === 'h2o' ? renderH2oManager(h2o, connected) : `
+          <section class="appcenter-marketbar">
+            <div>
+              <h4>${escapeHtml(appCategory === 'all' ? '推荐应用' : categoryTitle(appCategory))}</h4>
+              <p>${escapeHtml(visibleApps.length)} 个应用</p>
+            </div>
+            <label class="appcenter-search">
+              <span>⌕</span>
+              <input data-app-search value="${escapeAttr(appSearch)}" placeholder="搜索应用" />
+            </label>
+          </section>
+
+          <section class="catalog-grid appcenter-card-grid mx-scrollbar">
+            ${visibleApps.length ? visibleApps.map((app) => renderAppCenterCard(app, connected, selected?.appId === app.appId)).join('') : renderEmptyCatalog()}
+          </section>
+        `}
+      </section>
+
+      ${selected ? renderAppCenterSidePanel(selected, connected) : ''}
+    </section>
+  `;
+}
+
+function appCatalog() {
+  const h2o = state.apps?.h2o || {};
+  const luo = state.apps?.luo || state.apps?.['luopan-bridge'] || {};
+  const catalogShellAppIds = new Set([
+    'appcenter',
+    'mx-h2i',
+    'mx-h2i-launcher',
+    'h2i',
+    'launcher',
+    'h2o',
+    'diagnostics',
+    'luo',
+    'luopan-bridge'
+  ]);
+  const dynamicApps = Object.entries(state.apps || {})
+    .filter(([appId, app]) => {
+      if (catalogShellAppIds.has(appId)) return false;
+      const launcherMode = app?.launcherMode || 'embed';
+      const channel = app?.standaloneChannelProductId || 'mx-h2i';
+      return launcherMode === 'embed' && channel === 'mx-h2i';
+    })
+    .map(([appId, app]) => normalizeCatalogApp(app, {
+      appId,
+      displayName: app?.displayName || appId,
+      category: app?.category || 'custom',
+      description: app?.description || '',
+      packageName: app?.packageName || `@qpjoy/electron-launcher-app-${appId}`
+    }));
+  return [
+    normalizeCatalogApp(h2o, {
+      appId: 'h2o',
+      displayName: 'H2O',
+      fullName: 'Home To Oversea',
+      category: 'network',
+      description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
+      packageName: '@qpjoy/electron-launcher-app-h2o',
+      permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy', 'system:exec:mihomo'],
+      requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'network.tunnel.mihomo', 'app-center-runtime'],
+      manifest: {
+        appId: 'h2o',
+        productId: 'h2o',
+        displayName: 'H2O',
+        description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
+        packageName: '@qpjoy/electron-launcher-app-h2o',
+        category: 'network',
+        launcherMode: 'embed',
+        protocolVersion: '2',
+        runtimeContractVersion: '0.1',
+        requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'network.tunnel.mihomo', 'app-center-runtime'],
+        network: { scope: 'broker-session' },
+        runtimeDependencies: {
+          packages: ['@qpjoy/electron-plugin-tunnel', '@qpjoy/electron-core-mihomo'],
+          optionalPackages: [
+            '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64',
+            '@qpjoy/electron-plugin-tunnel-engine-darwin-x64',
+            '@qpjoy/electron-plugin-tunnel-engine-linux-arm64',
+            '@qpjoy/electron-plugin-tunnel-engine-linux-x64',
+            '@qpjoy/electron-plugin-tunnel-engine-win32-x64'
+          ]
+        },
+        embed: { standaloneChannelProductId: 'mx-h2i', launchWithoutBroker: 'blocked' }
+      }
+    }),
+    ...dynamicApps,
+    normalizeCatalogApp({
+      appId: 'diagnostics',
+      displayName: 'Diagnostics',
+      category: 'ops',
+      description: 'Route proof、H/D/I/O trace、broker smoke 和版本巡检。',
+      packageName: '@qpjoy/electron-launcher-app-diagnostics',
+      launcherMode: 'embed',
+      standaloneChannelProductId: 'mx-h2i',
+      networkScope: 'broker-session',
+      version: '0.1.0',
+      latestVersion: state.update?.latestVersion || '0.1.1',
+      installed: true,
+      enabled: true,
+      status: 'ready',
+      runtimeState: state.update?.status || 'idle',
+      installSource: 'npm',
+      permissions: ['observability.read', 'release.read'],
+      entrypoints: { desktop: 'app://diagnostics/index.html' }
+    }, {}),
+    normalizeCatalogApp({
+      ...luo,
+      appId: 'luo',
+      displayName: 'Luo',
+      category: 'bridge',
+      description: 'Launcher 网络、权限、用户和通道能力测试工具。',
+      packageName: '@qpjoy/electron-launcher-app-luo',
+      launcherMode: 'embed',
+      standaloneChannelProductId: 'mx-h2i',
+      networkScope: 'broker-session',
+      version: luo.version || '0.1.0',
+      latestVersion: luo.latestVersion || '0.1.0',
+      installed: luo.installed === true,
+      enabled: luo.enabled === true,
+      status: luo.status || 'available',
+      runtimeState: luo.runtimeState || (luo.installed ? 'ready' : 'idle'),
+      installSource: luo.installSource || 'npm',
+      permissions: ['launcher.bridge.read', 'network.status', 'permission.request'],
+      entrypoints: { desktop: 'app://luo/index.html' }
+    }, {})
+  ];
+}
+
+function normalizeCatalogApp(app, defaults) {
+  const row = app && typeof app === 'object' ? app : {};
+  return {
+    ...defaults,
+    ...row,
+    appId: row.appId || defaults.appId,
+    displayName: row.displayName || defaults.displayName,
+    fullName: row.fullName || defaults.fullName || '',
+    category: row.category || defaults.category || 'custom',
+    description: row.description || defaults.description || '',
+    packageName: row.packageName || defaults.packageName || `@qpjoy/electron-launcher-app-${row.appId || defaults.appId}`,
+    launcherMode: row.launcherMode || defaults.launcherMode || 'embed',
+    standaloneChannelProductId: row.standaloneChannelProductId || defaults.standaloneChannelProductId || 'mx-h2i',
+    networkScope: row.networkScope || defaults.networkScope || 'broker-session',
+    version: row.version || defaults.version || '0.1.0',
+    latestVersion: row.latestVersion || defaults.latestVersion || row.version || defaults.version || '0.1.0',
+    installedVersion: row.installedVersion || defaults.installedVersion || null,
+    installSource: row.installSource || defaults.installSource || 'npm',
+    runtimeState: row.runtimeState || defaults.runtimeState || (row.enabled ? 'ready' : row.installed ? 'installed' : 'idle'),
+    permissions: Array.isArray(row.permissions) ? row.permissions : defaults.permissions || [],
+    requiredCapabilities: Array.isArray(row.requiredCapabilities) ? row.requiredCapabilities : defaults.requiredCapabilities || [],
+    manifest: row.manifest || defaults.manifest || null,
+    entrypoints: row.entrypoints || defaults.entrypoints || {}
+  };
+}
+
+function filteredAppCatalog(apps) {
+  const query = appSearch.trim().toLowerCase();
+  return apps.filter((app) => {
+    const matchesCategory = appCategory === 'all'
+      || app.category === appCategory
+      || (appCategory === 'updates' && app.latestVersion && app.latestVersion !== (app.installedVersion || app.version));
+    if (!matchesCategory) return false;
+    if (!query) return true;
+    const haystack = [
+      app.appId,
+      app.displayName,
+      app.category,
+      app.packageName,
+      app.description,
+      app.networkScope,
+      app.standaloneChannelProductId,
+      ...(app.permissions || [])
+    ].join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function appCenterCategories(apps) {
+  const rows = [
+    { id: 'all', label: '全部应用', count: apps.length },
+    { id: 'network', label: '网络工具', count: apps.filter((app) => app.category === 'network').length },
+    { id: 'ops', label: '工具箱', count: apps.filter((app) => app.category === 'ops').length },
+    { id: 'bridge', label: '测试工具', count: apps.filter((app) => app.category === 'bridge').length },
+    { id: 'updates', label: '可更新', count: apps.filter((app) => app.latestVersion && app.latestVersion !== (app.installedVersion || app.version)).length }
+  ];
+  return rows.filter((item) => item.id === 'all' || item.count > 0);
+}
+
+function categoryTitle(category) {
+  return appCenterCategories(appCatalog()).find((item) => item.id === category)?.label || '应用';
+}
+
+function renderAppCenterErrorBanner(apps) {
+  const errored = apps.find((app) => appNeedsAttention(app));
+  if (!errored) return '';
+  const errorMessage = appVisibleErrorMessage(errored);
+  return `
+    <div class="appcenter-error-banner">
+      <strong>${escapeHtml(errored.displayName)} 需要处理</strong>
+      <span>${escapeHtml(errorMessage || '应用运行状态异常，打开 Debug 查看详情。')}</span>
+      <button class="secondary-button" type="button" data-action="toggle-app-debug">Debug</button>
+    </div>
+  `;
+}
+
+function renderAppCenterCard(app, connected, selected) {
+  const action = appPrimaryAction(app, connected);
+  return `
+    <article
+      class="catalog-card appcenter-app-card ${selected ? 'is-active' : ''}"
+      role="button"
+      tabindex="0"
+      data-action="select-app"
+      data-app-id="${escapeAttr(app.appId)}"
+      aria-label="${escapeAttr(`选择 ${app.displayName}`)}"
+    >
+      <div class="catalog-cover" data-category="${escapeAttr(app.category)}">
+        <span>${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</span>
+      </div>
+      <div class="catalog-card-body">
+        <div>
+          <h4>${escapeHtml(app.displayName)}</h4>
+          <p>${escapeHtml(app.description)}</p>
+        </div>
+        <div class="app-tag-row">
+          ${appUserTags(app).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+        </div>
+      </div>
+      <div class="catalog-card-foot">
+        <span class="status-dot" data-state="${escapeAttr(app.status || app.runtimeState || 'available')}">${escapeHtml(appUserStatus(app))}</span>
+        <button class="secondary-button" type="button" data-action="${escapeAttr(action.action)}" data-app-id="${escapeAttr(app.appId)}" ${action.disabled ? 'disabled' : ''}>
+          ${escapeHtml(action.label)}
+        </button>
+      </div>
+    </article>
+  `;
+}
+
+function renderAppCenterSidePanel(app, connected) {
+  if (appInspectorCollapsed) return renderCollapsedAppInspector(app);
+  return appDebugOpen ? renderAppCenterDebugPanel(app, connected) : renderAppCenterUserPanel(app, connected);
+}
+
+function renderCollapsedAppInspector(app) {
+  return `
+    <aside class="appcenter-inspector appcenter-inspector-rail">
+      <button class="inspector-rail-button" type="button" data-action="toggle-app-inspector" aria-label="展开应用详情">
+        <span class="app-icon-mini">${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</span>
+        <strong>${escapeHtml(app.displayName)}</strong>
+        <span aria-hidden="true">‹</span>
+      </button>
+    </aside>
+  `;
+}
+
+function renderAppCenterUserPanel(app, connected) {
+  const action = appPrimaryAction(app, connected);
+  const errorMessage = appVisibleErrorMessage(app);
+  return `
+    <aside class="appcenter-inspector appcenter-user-panel mx-scrollbar">
+      <div class="inspector-head">
+        <div class="app-icon-large">${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</div>
+        <div>
+          <p class="kicker">${escapeHtml(categoryTitle(app.category))}</p>
+          <h4>${escapeHtml(app.displayName)}</h4>
+          <span>${escapeHtml(appUserStatus(app))}</span>
+        </div>
+        <button class="inspector-collapse-button" type="button" data-action="toggle-app-inspector" aria-label="收起应用详情">›</button>
+      </div>
+      <p class="inspector-summary">${escapeHtml(app.description)}</p>
+      ${errorMessage ? `<div class="app-inline-error">${escapeHtml(errorMessage)}</div>` : ''}
+      <div class="app-user-facts">
+        <div><span>版本</span><strong>${escapeHtml(app.installedVersion || app.version || '0.1.0')}</strong></div>
+        <div><span>更新</span><strong>${escapeHtml(app.latestVersion && app.latestVersion !== (app.installedVersion || app.version) ? `${app.latestVersion} 可用` : '已是最新')}</strong></div>
+        <div><span>状态</span><strong>${escapeHtml(appUserStatus(app))}</strong></div>
+      </div>
+      <div class="app-feature-list">
+        ${appUserFeatures(app).map((item) => `<div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.detail)}</span></div>`).join('')}
+      </div>
+      ${app.appId === 'h2o' ? renderH2oPluginPanel(app) : ''}
+      <div class="app-user-actions">
+        <button class="primary-button block-button" type="button" data-action="${escapeAttr(action.action)}" ${action.disabled ? 'disabled' : ''}>
+          ${escapeHtml(action.label)}
+        </button>
+        ${app.appId === 'h2o' && app.runtimeState === 'running'
+          ? '<button class="secondary-button block-button" type="button" data-action="stopH2o">停止</button>'
+          : ''}
+        <button class="secondary-button block-button" type="button" data-action="toggle-app-debug">Debug</button>
+      </div>
+      ${renderAppRecentLogs(app)}
+    </aside>
+  `;
+}
+
+function renderAppCenterDebugPanel(app, connected) {
+  const action = appPrimaryAction(app, connected);
+  return `
+    <aside class="appcenter-inspector appcenter-debug-panel mx-scrollbar">
+      <div class="inspector-head">
+        <div class="app-icon-large">${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</div>
+        <div>
+          <p class="kicker">DEBUG</p>
+          <h4>${escapeHtml(app.displayName)}</h4>
+          <span>${escapeHtml(app.packageName)}</span>
+        </div>
+        <button class="inspector-collapse-button" type="button" data-action="toggle-app-inspector" aria-label="收起应用详情">›</button>
+      </div>
+      <div class="detail-list">
+        <div><span>Mode</span><strong>${escapeHtml(app.launcherMode)}</strong></div>
+        <div><span>Channel</span><strong>${escapeHtml(app.standaloneChannelProductId || '-')}</strong></div>
+        <div><span>Network</span><strong>${escapeHtml(app.networkScope || '-')}</strong></div>
+        <div><span>Contract</span><strong>${escapeHtml(app.manifest?.runtimeContractVersion || '-')}</strong></div>
+        <div><span>Install</span><strong>${escapeHtml(app.installSource || 'npm')}</strong></div>
+        <div><span>Path</span><strong>${escapeHtml(app.installPath || '-')}</strong></div>
+        <div><span>Installed</span><strong>${escapeHtml(app.installedVersion || (app.installed ? app.version : 'not installed'))}</strong></div>
+        <div><span>Latest</span><strong>${escapeHtml(app.latestVersion || app.version)}</strong></div>
+        <div><span>Runtime</span><strong>${escapeHtml(app.runtimeState || app.status || 'idle')}</strong></div>
+        <div><span>Plugin Mode</span><strong>${escapeHtml(app.runtime?.mode || '-')}</strong></div>
+        <div><span>Plugin Admin</span><strong>${escapeHtml(app.runtime?.adminUrl || '-')}</strong></div>
+        <div><span>Plugin Ports</span><strong>${escapeHtml(app.runtime?.ports ? `mixed:${app.runtime.ports.mixed} dns:${app.runtime.ports.dns}` : '-')}</strong></div>
+        <div><span>Last Action</span><strong>${escapeHtml(formatDateTime(app.lastAction))}</strong></div>
+      </div>
+      <div class="permission-stack">
+        ${[...(app.permissions || []), ...(app.requiredCapabilities || [])].filter((item, index, rows) => rows.indexOf(item) === index).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+      </div>
+      <div class="entrypoint-box">
+        <strong>Entrypoints</strong>
+        ${Object.entries(app.entrypoints || {}).map(([key, value]) => `<span>${escapeHtml(key)}: ${escapeHtml(value)}</span>`).join('') || '<span>-</span>'}
+      </div>
+      ${renderAppRecentLogs(app, true)}
+      <button class="primary-button block-button" type="button" data-action="${escapeAttr(action.action)}" ${action.disabled ? 'disabled' : ''}>
+        ${escapeHtml(action.label)}
+      </button>
+      <button class="secondary-button block-button" type="button" data-action="toggle-app-debug">关闭 Debug</button>
+    </aside>
+  `;
+}
+
+function renderH2oManager(app, connected) {
+  const runtime = h2oRuntime(app);
+  const running = runtime.running === true;
+  const activeSubscriptionReady = h2oHasUsableSubscription(runtime);
+  const canLaunch = activeSubscriptionReady || h2oCanAutoHydrateSubscription(runtime);
+  const refreshDisabled = !connected || (runtime.activeSubscription.requiresUser && !isUserIdentity()) || busyAction === 'refreshH2oSubscription';
+  return `
+    <section class="h2o-manager mx-scrollbar">
+      <section class="h2o-manager-hero" data-state="${escapeAttr(running ? 'running' : runtime.status)}">
+        <div>
+          <p class="kicker">HOME TO OVERSEA</p>
+          <h4>${escapeHtml(runtime.activeSubscription.name)}</h4>
+          <span>${escapeHtml(h2oSubscriptionStatusText(runtime, connected))}</span>
+        </div>
+        <div class="h2o-manager-actions">
+          <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(runtime.activeSubscription.id)}" ${refreshDisabled ? 'disabled' : ''}>刷新订阅</button>
+          <button class="${running ? 'secondary-button' : 'primary-button'}" type="button" data-action="${running ? 'stopH2o' : 'launchH2o'}" ${!connected || (!running && !canLaunch) || busyAction === 'launchH2o' || busyAction === 'stopH2o' ? 'disabled' : ''}>
+            ${running ? '停止' : '启动'}
+          </button>
+        </div>
+      </section>
+
+      <nav class="h2o-manager-tabs" aria-label="H2O sections">
+        ${h2oManagerTab('overview', '首页')}
+        ${h2oManagerTab('proxy', '代理')}
+        ${h2oManagerTab('subscriptions', '订阅')}
+        ${h2oManagerTab('rules', '规则')}
+        ${h2oManagerTab('test', '测试')}
+        ${h2oManagerTab('logs', '日志')}
+      </nav>
+
+      ${renderH2oManagerBody(runtime, app, connected)}
+    </section>
+  `;
+}
+
+function h2oManagerTab(id, label) {
+  return `<button class="${h2oManagerView === id ? 'is-active' : ''}" type="button" data-action="set-h2o-view" data-view="${escapeAttr(id)}">${escapeHtml(label)}</button>`;
+}
+
+function renderH2oManagerBody(runtime, app, connected) {
+  if (h2oManagerView === 'proxy') return renderH2oProxyManager(runtime, connected);
+  if (h2oManagerView === 'subscriptions') return renderH2oSubscriptionManager(runtime, connected);
+  if (h2oManagerView === 'rules') return renderH2oRuleManager(runtime, connected);
+  if (h2oManagerView === 'test') return renderH2oTestManager(runtime, connected);
+  if (h2oManagerView === 'logs') return renderH2oLogManager(runtime, app);
+  return renderH2oOverviewManager(runtime, app, connected);
+}
+
+function renderH2oOverviewManager(runtime, app, connected) {
+  const activeSubscriptionReady = h2oHasUsableSubscription(runtime);
+  const canLaunch = activeSubscriptionReady || h2oCanAutoHydrateSubscription(runtime);
+  return `
+    <section class="h2o-manager-view">
+      <div class="h2o-stat-grid">
+        ${h2oStat('运行状态', h2oRuntimeStatusLabel(runtime))}
+        ${h2oStat('当前模式', h2oModeLabel(runtime.mode))}
+        ${h2oStat('当前订阅', runtime.activeSubscription.name)}
+        ${h2oStat('活跃连接', String(runtime.metrics.connections || 0))}
+        ${h2oStat('上传总量', formatBytes(runtime.metrics.uploadBytes))}
+        ${h2oStat('下载总量', formatBytes(runtime.metrics.downloadBytes))}
+        ${h2oStat('本地代理', `:${runtime.ports.mixed}`)}
+        ${h2oStat('管理后台', `:${runtime.ports.admin}`)}
+      </div>
+      <section class="h2o-action-band">
+        <div>
+          <strong>${escapeHtml(runtime.running ? '策略运行中' : '策略未启动')}</strong>
+          <span>${escapeHtml(runtime.running ? 'PAC、Split DNS 和代理规则由 MX-H2I broker-session 合并执行。' : '启动后 H2O 会使用当前 AppCenter 权限和 managed profile。')}</span>
+        </div>
+        <div class="toolbar-actions">
+          <button class="secondary-button" type="button" data-action="requestH2oProxy" ${!runtime.running || !connected || !activeSubscriptionReady ? 'disabled' : ''}>应用策略</button>
+          <button class="primary-button" type="button" data-action="${runtime.running ? 'stopH2o' : 'launchH2o'}" ${!connected || (!runtime.running && !canLaunch) ? 'disabled' : ''}>${runtime.running ? '停止' : '启动'}</button>
+        </div>
+      </section>
+      <section class="h2o-rule-preview">
+        <div class="panel-head">
+          <div>
+            <h4>常用规则</h4>
+            <p>${escapeHtml(`${runtime.rules.filter((rule) => rule.enabled !== false).length} 条启用`)}</p>
+          </div>
+          <button class="secondary-button" type="button" data-action="set-h2o-view" data-view="rules">管理规则</button>
+        </div>
+        ${renderH2oRuleRows(runtime.rules.slice(0, 4), true)}
+      </section>
+      ${!app.installed ? '<p class="h2o-manager-note">H2O 尚未安装，先从右侧详情安装后再启动。</p>' : ''}
+    </section>
+  `;
+}
+
+function renderH2oProxyManager(runtime, connected) {
+  const activeSubscriptionReady = h2oHasUsableSubscription(runtime);
+  return `
+    <section class="h2o-manager-view">
+      <section class="h2o-action-band">
+        <div>
+          <strong>${escapeHtml(h2oModeLabel(runtime.mode))}</strong>
+          <span>${escapeHtml(h2oModeGuidance(runtime.mode, runtime))}</span>
+        </div>
+        <div class="toolbar-actions">
+          <button class="secondary-button" type="button" data-action="requestH2oProxy" ${!runtime.running || !connected || !activeSubscriptionReady ? 'disabled' : ''}>切换</button>
+          <button class="primary-button" type="button" data-action="${runtime.tunInstalled ? 'uninstallH2oTun' : 'installH2oTun'}" ${!connected ? 'disabled' : ''}>${runtime.tunInstalled ? '卸载 TUN' : '安装 TUN'}</button>
+        </div>
+      </section>
+      <div class="h2o-mode-grid">
+        ${h2oManagerModeButton('app-rule', runtime.mode, 'App 模式')}
+        ${h2oManagerModeButton('app-global', runtime.mode, '全局模式')}
+        ${h2oManagerModeButton('system-tun', runtime.mode, '虚拟网卡')}
+      </div>
+      ${renderH2oNodePanel(runtime)}
+      ${renderH2oTuningPanel(runtime)}
+      <section class="h2o-port-panel">
+        <div class="panel-head">
+          <div>
+            <h4>端口</h4>
+            <p>推荐 mixed 23458 / DNS 1053</p>
+          </div>
+          <button class="secondary-button" type="button" data-action="saveH2oPorts">保存端口</button>
+        </div>
+        <div class="h2o-port-grid">
+          ${h2oPortField('mixed', 'Mixed', runtime.ports.mixed)}
+          ${h2oPortField('dns', 'DNS', runtime.ports.dns)}
+          ${h2oPortField('controller', 'Controller', runtime.ports.controller)}
+          ${h2oPortField('admin', 'Admin', runtime.ports.admin)}
+        </div>
+      </section>
+      <div class="h2o-stat-grid is-compact">
+        ${h2oStat('引擎来源', '内置 mihomo')}
+        ${h2oStat('TUN', runtime.tunInstalled ? '已安装' : '未安装')}
+        ${h2oStat('控制接口', `:${runtime.ports.controller}`)}
+        ${h2oStat('最近应用', formatDateTime(runtime.lastAppliedAt))}
+      </div>
+    </section>
+  `;
+}
+
+function renderH2oSubscriptionManager(runtime, connected) {
+  const currentUserReady = isUserIdentity();
+  const managedSubscription = runtime.subscriptions.find((item) => item.id === 'h2o-default') || runtime.activeSubscription;
+  const refreshManagedDisabled = !connected || (managedSubscription.requiresUser && !currentUserReady) || busyAction === 'refreshH2oSubscription';
+  const draft = h2oSubscriptionDraft || defaultH2oSubscriptionDraft();
+  const editing = Boolean(h2oSubscriptionEditId);
+  return `
+    <section class="h2o-manager-view">
+      <section class="h2o-action-band">
+        <div>
+          <strong>Managed Oversea Profile</strong>
+          <span>${escapeHtml(h2oManagedProfileSummary(runtime, currentUserReady))}</span>
+        </div>
+        <div class="toolbar-actions">
+          <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(managedSubscription.id)}" ${refreshManagedDisabled ? 'disabled' : ''}>刷新系统订阅</button>
+        </div>
+      </section>
+      <form class="h2o-subscription-form" data-form-action="add-h2o-subscription">
+        <input name="name" placeholder="订阅名称" autocomplete="off" value="${escapeAttr(draft.name)}" />
+        <input name="url" type="url" placeholder="订阅链接 https://..." autocomplete="off" required value="${escapeAttr(draft.url)}" />
+        <select name="authType">
+          <option value="none" ${draft.authType === 'basic' ? '' : 'selected'}>无认证</option>
+          <option value="basic" ${draft.authType === 'basic' ? 'selected' : ''}>Basic Auth</option>
+        </select>
+        <input name="username" placeholder="Basic 用户" autocomplete="username" value="${escapeAttr(draft.username)}" />
+        <input name="password" type="password" placeholder="Basic 密码" autocomplete="current-password" value="${escapeAttr(draft.password)}" />
+        <button class="primary-button" type="submit" ${busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>${editing ? '保存修改' : '保存订阅'}</button>
+        ${editing ? '<button class="secondary-button" type="button" data-action="cancelH2oSubscriptionEdit">取消</button>' : ''}
+      </form>
+      <div class="h2o-subscription-list">
+        ${runtime.subscriptions.map((item) => {
+          const usable = h2oSubscriptionUsable(item);
+          const authBadge = h2oSubscriptionAuthBadge(item);
+          const isCustom = item.source === 'custom';
+          const canDelete = h2oSubscriptionCanDelete(item);
+          return `
+          <article class="${item.id === runtime.activeSubscription.id ? 'is-active' : ''} ${usable ? '' : 'is-disabled'}">
+            <div>
+              <strong>${escapeHtml(item.name)}</strong>
+              <span>${escapeHtml(item.url)}</span>
+              ${h2oSubscriptionNeedsBearer(item) ? renderH2oClashLink(runtime, connected, currentUserReady, busyAction) : ''}
+            </div>
+            <div class="h2o-subscription-meta">
+              <span>${escapeHtml(h2oSubscriptionBadge(item))}</span>
+              ${authBadge ? `<span>${escapeHtml(authBadge)}</span>` : ''}
+              <span>${escapeHtml(String(item.nodes || 0))} nodes</span>
+              <span>${escapeHtml(String(item.latencyMs || '-'))} ms</span>
+              <span>${escapeHtml(formatDateTime(item.lastUpdatedAt))}</span>
+            </div>
+            ${item.errorMessage ? `<small class="h2o-subscription-reason">${escapeHtml(item.errorMessage)}</small>` : ''}
+            <div class="toolbar-actions">
+              <button class="secondary-button" type="button" data-action="pinH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>置顶</button>
+              ${isCustom ? `<button class="secondary-button" type="button" data-action="editH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>编辑</button>` : ''}
+              ${canDelete ? `<button class="secondary-button" type="button" data-action="deleteH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${busyAction === 'updateH2oRuntime' ? 'disabled' : ''}>删除</button>` : ''}
+              <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${!connected || (item.requiresUser && !currentUserReady) || busyAction === 'refreshH2oSubscription' ? 'disabled' : ''}>刷新</button>
+              <button class="primary-button" type="button" data-action="setH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${item.id === runtime.activeSubscription.id || !connected || !usable ? 'disabled' : ''}>使用</button>
+            </div>
+          </article>
+        `; }).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderH2oRuleManager(runtime, connected) {
+  return `
+    <section class="h2o-manager-view">
+      <section class="h2o-rule-packs">
+        ${H2O_RULE_PACKS.map((pack) => `
+          <article>
+            <div>
+              <strong>${escapeHtml(pack.label)}</strong>
+              <span>${escapeHtml(String(pack.hosts.length))} domains / CDN</span>
+            </div>
+            <div class="toolbar-actions">
+              <button class="secondary-button" type="button" data-action="addH2oRulePack" data-rule-pack="${escapeAttr(pack.id)}" ${!connected ? 'disabled' : ''}>添加</button>
+              <button class="secondary-button" type="button" data-action="removeH2oRulePack" data-rule-pack="${escapeAttr(pack.id)}" ${!connected ? 'disabled' : ''}>移除</button>
+            </div>
+          </article>
+        `).join('')}
+      </section>
+      <form class="h2o-rule-form" data-form-action="add-h2o-rule">
+        <input name="host" placeholder="example.com" />
+        <select name="kind">
+          <option value="allow">白名单</option>
+          <option value="block">黑名单</option>
+        </select>
+        <button class="primary-button" type="submit" ${!connected ? 'disabled' : ''}>添加</button>
+      </form>
+      ${renderH2oRuleRows(runtime.rules, false)}
+    </section>
+  `;
+}
+
+function renderH2oTestManager(runtime, connected) {
+  return `
+    <section class="h2o-manager-view">
+      <section class="h2o-test-panel">
+        <input data-h2o-test-url value="${escapeAttr(h2oTestUrlDraft || H2O_DEFAULT_TEST_URL)}" />
+        <button class="primary-button" type="button" data-action="runH2oTest" ${!connected ? 'disabled' : ''}>打开测试窗口</button>
+      </section>
+      <section class="h2o-test-presets">
+        ${H2O_TEST_PRESETS.map((preset) => `
+          <button class="secondary-button" type="button" data-action="runH2oTest" data-test-url="${escapeAttr(preset.url)}" ${!connected ? 'disabled' : ''}>${escapeHtml(preset.label)}</button>
+        `).join('')}
+      </section>
+      <div class="h2o-stat-grid is-compact">
+        ${h2oStat('当前模式', h2oModeLabel(runtime.mode))}
+        ${h2oStat('本地代理', `:${runtime.ports.mixed}`)}
+        ${h2oStat('运行状态', h2oRuntimeStatusLabel(runtime))}
+      </div>
+    </section>
+  `;
+}
+
+function renderH2oLogManager(runtime, app) {
+  const rows = h2oLogRows(runtime, app);
+  return `
+    <section class="h2o-manager-view">
+      <div class="h2o-log-stream">
+        ${rows.map((item) => `
+          <div data-level="${escapeAttr(item.level || 'info')}">
+            <strong>${escapeHtml(item.message)}</strong>
+            <span>${escapeHtml(formatDateTime(item.at))}</span>
+          </div>
+        `).join('') || '<p class="empty">暂无日志</p>'}
+      </div>
+    </section>
+  `;
+}
+
+function renderH2oRuleRows(rules, compact) {
+  return `
+    <div class="h2o-rule-list ${compact ? 'is-compact' : ''}">
+      ${rules.map((rule) => `
+        <article class="${rule.enabled === false ? 'is-disabled' : ''}" data-kind="${escapeAttr(rule.kind)}">
+          <div>
+            <strong>${escapeHtml(rule.host)}</strong>
+            <span>${escapeHtml(rule.target)}</span>
+          </div>
+          <em>${escapeHtml(h2oRuleKindLabel(rule.kind))}</em>
+          ${compact ? '' : `<button class="secondary-button" type="button" data-action="toggleH2oRule" data-rule-id="${escapeAttr(rule.id)}">${rule.enabled === false ? '启用' : '停用'}</button>`}
+        </article>
+      `).join('') || '<p class="empty">暂无规则</p>'}
+    </div>
+  `;
+}
+
+function h2oStat(label, value) {
+  return `<article class="h2o-stat-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '-')}</strong></article>`;
+}
+
+function h2oManagerModeButton(mode, activeMode, label) {
+  return `<button class="${mode === activeMode ? 'is-active' : ''}" type="button" data-action="setH2oMode" data-mode="${escapeAttr(mode)}">${escapeHtml(label)}</button>`;
+}
+
+function h2oPortField(name, label, value) {
+  return `
+    <label>
+      <span>${escapeHtml(label)}</span>
+      <input data-h2o-port="${escapeAttr(name)}" inputmode="numeric" value="${escapeAttr(String(value || ''))}" />
+    </label>
+  `;
+}
+
+function renderH2oPluginPanel(app) {
+  const runtime = h2oRuntime(app);
+  const ports = runtime.ports || {};
+  const subscription = runtime.activeSubscription || {};
+  return `
+    <div class="h2o-plugin-panel">
+      <div class="h2o-plugin-head">
+        <strong>代理模式</strong>
+        <span>${escapeHtml(h2oModeLabel(runtime.mode))}</span>
+      </div>
+      <div class="h2o-mode-row">
+        ${h2oModeButton('app-rule', runtime.mode, '规则')}
+        ${h2oModeButton('app-global', runtime.mode, '全局')}
+        ${h2oModeButton('system-tun', runtime.mode, '网卡')}
+      </div>
+      <div class="h2o-runtime-facts">
+        <div><span>订阅</span><strong>${escapeHtml(subscription.name || 'System Oversea 默认订阅')}</strong></div>
+        <div><span>节点</span><strong>${escapeHtml(String(subscription.nodes || 0))}</strong></div>
+        <div><span>延迟</span><strong>${escapeHtml(subscription.latencyMs ? `${subscription.latencyMs} ms` : '-')}</strong></div>
+        <div><span>端口</span><strong>${escapeHtml(`:${ports.mixed || 23458}`)}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+function h2oModeButton(mode, activeMode, label) {
+  return `<button class="${mode === activeMode ? 'is-active' : ''}" type="button" data-action="setH2oMode" data-mode="${escapeAttr(mode)}">${escapeHtml(label)}</button>`;
+}
+
+function h2oModeLabel(mode) {
+  if (mode === 'app-global') return '全局模式';
+  if (mode === 'system-tun') return '虚拟网卡';
+  return 'App 模式';
+}
+
+function h2oModeNeedsTun(mode) {
+  return normalizeH2oModeUi(mode) === 'system-tun';
+}
+
+function h2oTuning(runtime) {
+  const row = runtime && typeof runtime.tuning === 'object' && runtime.tuning ? runtime.tuning : {};
+  return {
+    dnsMode: row.dnsMode === 'redir-host' ? 'redir-host' : 'fake-ip',
+    tunStack: row.tunStack === 'gvisor' || row.tunStack === 'mixed' ? row.tunStack : 'system',
+    strictRoute: row.strictRoute === true,
+    cnDirect: row.cnDirect !== false
+  };
+}
+
+// fake-ip / redir-host、协议栈和 cn-direct 独立于模式，切模式不重置这些偏好。
+function renderH2oTuningPanel(runtime) {
+  const tuning = h2oTuning(runtime);
+  const tunMode = h2oModeNeedsTun(runtime.mode);
+  return `
+    <section class="h2o-port-panel">
+      <div class="panel-head">
+        <div>
+          <h4>解析与分流</h4>
+          <p>独立于代理模式，切换模式不会重置</p>
+        </div>
+      </div>
+      <div class="h2o-mode-grid">
+        ${h2oTuningButton('dnsMode', 'fake-ip', tuning.dnsMode, 'Fake-IP')}
+        ${h2oTuningButton('dnsMode', 'redir-host', tuning.dnsMode, 'Redir-Host')}
+      </div>
+      <p class="h2o-manager-note">${escapeHtml(tuning.dnsMode === 'fake-ip'
+        ? 'Fake-IP：DNS 只返回 198.18.x 占位地址，由 H2O 按域名分流，最快且不泄漏查询。内网域名和 MX-H2I 控制面已在排除表里。'
+        : 'Redir-Host：解析真实 IP 再分流，兼容需要真实地址的局域网、游戏和直连探测。')}</p>
+      <div class="h2o-mode-grid">
+        ${h2oTuningButton('cnDirect', 'on', tuning.cnDirect ? 'on' : 'off', '国内直连')}
+        ${h2oTuningButton('cnDirect', 'off', tuning.cnDirect ? 'on' : 'off', '全部走 H2O')}
+      </div>
+      ${tunMode ? `
+      <div class="h2o-mode-grid">
+        ${h2oTuningButton('tunStack', 'system', tuning.tunStack, 'system 栈')}
+        ${h2oTuningButton('tunStack', 'mixed', tuning.tunStack, 'mixed 栈')}
+        ${h2oTuningButton('tunStack', 'gvisor', tuning.tunStack, 'gvisor 栈')}
+      </div>
+      <p class="h2o-manager-note">${escapeHtml(h2oTunStackGuidance(tuning.tunStack))}</p>
+      <div class="h2o-mode-grid">
+        ${h2oTuningButton('strictRoute', 'off', tuning.strictRoute ? 'on' : 'off', '宽松路由')}
+        ${h2oTuningButton('strictRoute', 'on', tuning.strictRoute ? 'on' : 'off', '严格路由')}
+      </div>
+      <p class="h2o-manager-note">${escapeHtml(tuning.strictRoute
+        ? '严格路由：用防火墙规则把绕过虚拟网卡的流量也抓回来，防泄漏更强，但会和其它 VPN、外部 Clash 抢路由。'
+        : '宽松路由（推荐）：只接管进入虚拟网卡的流量，和其它 VPN 共存最好。')}</p>` : ''}
+    </section>
+  `;
+}
+
+// 一个 oversea entitlement 可以覆盖多台机器；节点切换只改 select 组，
+// 规则、订阅和当前模式都不受影响。
+function renderH2oNodePanel(runtime) {
+  const nodes = runtime.nodes || [];
+  if (!nodes.length) {
+    return `
+      <section class="h2o-port-panel">
+        <div class="panel-head">
+          <div>
+            <h4>出海节点</h4>
+            <p>启动后显示当前订阅提供的节点</p>
+          </div>
+        </div>
+        <p class="h2o-manager-note">当前订阅还没有解析出可选节点。若已分配多个 oversea 站点，请先刷新订阅再启动 H2O。</p>
+      </section>
+    `;
+  }
+  const selected = runtime.selectedNode || nodes[0].name;
+  const activeNode = runtime.running ? runtime.activeNode : null;
+  return `
+    <section class="h2o-port-panel">
+      <div class="panel-head">
+        <div>
+          <h4>出海节点</h4>
+          <p>${escapeHtml(h2oNodeSummary(nodes, activeNode))}</p>
+        </div>
+      </div>
+      <div class="h2o-mode-grid">
+        ${nodes.map((node) => `<button class="${node.name === selected ? 'is-active' : ''} ${node.name === activeNode ? 'is-live' : ''}" type="button" data-action="selectH2oNode" data-node="${escapeAttr(node.name)}" title="${escapeAttr(h2oNodeDetail(node))}">${escapeHtml(node.name)}${node.name === activeNode ? ' ·' : ''}</button>`).join('')}
+      </div>
+      <p class="h2o-manager-note">${escapeHtml(h2oNodeNote(runtime, nodes, selected, activeNode))}</p>
+    </section>
+  `;
+}
+
+function h2oNodeSummary(nodes, activeNode) {
+  const base = `${nodes.length} 个可用节点`;
+  return activeNode ? `${base}｜当前出流量：${activeNode}` : base;
+}
+
+/**
+ * 多节点订阅带一个 fallback 组：当前节点探测不通会自动顺延到下一个，
+ * 所以「用户选的」和「实际在用的」可能不一致——这时候要说清楚，别让用户以为切换没生效。
+ */
+function h2oNodeNote(runtime, nodes, selected, activeNode) {
+  if (!runtime.running) return '当前未运行，所选节点在下次启动时生效。';
+  if (activeNode && activeNode !== selected) {
+    return `已自动顺延到 ${activeNode}（所选 ${selected} 当前探测不通）。恢复后会自动切回按顺序靠前的节点。`;
+  }
+  if (nodes.length > 1) {
+    return '运行中切换即时生效，不断开已有连接；未手动指定时按订阅顺序自动选择可用节点。';
+  }
+  return '运行中切换会通过控制接口即时生效，不会断开已有连接。';
+}
+
+function h2oNodeDetail(node) {
+  return [node.type, node.server && node.port ? `${node.server}:${node.port}` : node.server]
+    .filter(Boolean)
+    .join(' · ') || node.name;
+}
+
+// 遇到兼容性问题的升级路径：system -> mixed -> gvisor。
+function h2oTunStackGuidance(stack) {
+  if (stack === 'gvisor') {
+    return 'gvisor：全用户态协议栈，兼容性最好，代价是吞吐和内存开销更高。前两档都不行时再用。';
+  }
+  if (stack === 'mixed') {
+    return 'mixed：TCP 走内核栈、UDP 走 gvisor。system 栈下 UDP（游戏、语音、QUIC）异常时先换这一档。';
+  }
+  return 'system（默认）：直接用内核 TCP 栈，最快也最省内存。出问题按 system → mixed → gvisor 逐档升级。';
+}
+
+function h2oTuningButton(field, value, activeValue, label) {
+  return `<button class="${value === activeValue ? 'is-active' : ''}" type="button" data-action="setH2oTuning" data-tuning-field="${escapeAttr(field)}" data-tuning-value="${escapeAttr(value)}">${escapeHtml(label)}</button>`;
+}
+
+function h2oRuntimeStatusLabel(runtime) {
+  if (runtime.running) return '运行中';
+  if (runtime.status === 'starting') return '启动中';
+  if (runtime.status === 'subscription-initializing') return '初始化订阅';
+  if (runtime.status === 'ready') return '就绪';
+  if (runtime.status === 'error') return '异常';
+  if (runtime.status === 'proxy-unavailable') return '端口未监听';
+  if (runtime.status === 'tun-required') return '等待 TUN';
+  if (runtime.status === 'subscription-required') return '等待订阅';
+  return '已停止';
+}
+
+function h2oModeGuidance(mode, runtime) {
+  if (h2oModeNeedsTun(mode)) {
+    return runtime.tunInstalled
+      ? '虚拟网卡覆盖整机：当前应用、应用内通道、系统浏览器和其它应用都走 H2O；MX-H2I 自己的 WireGuard、Domestic bootstrap 和内网域名强制直连，不受影响。'
+      : '虚拟网卡需要先安装本机 TUN helper。';
+  }
+  if (mode === 'app-global') return '全局模式由 MX-H2I standalone 注册分发，覆盖当前应用和后续新建 BrowserWindow；国内 cn-direct，黑名单阻止访问，其余走 H2O。';
+  return 'App 模式只覆盖当前应用；cn-direct 优先，配置白名单后仅白名单域名走 H2O，H2O 不可用时回退系统代理。';
+}
+
+function h2oRuleKindLabel(kind) {
+  return kind === 'block' ? '黑名单' : '白名单';
+}
+
+function h2oSubscriptionBadge(item) {
+  if (item.requiresUser && !isUserIdentity()) return '等待登录';
+  if (item.status === 'login-required') return '等待登录';
+  if (item.syncStatus === 'initializing') return '初始化中';
+  if (item.status === 'error') return '异常';
+  if (item.status === 'pending') return item.syncStatus === 'pending-runtime-sync' ? '待同步' : '待分配';
+  if (item.source === 'custom') return '自定义';
+  if (item.source === 'demo') return 'Demo';
+  return '系统';
+}
+
+function h2oSubscriptionAuthBadge(item) {
+  if (item?.auth?.type === 'basic') return 'Basic Auth';
+  if (item?.headers && Object.keys(item.headers).length) return 'Headers';
+  return '';
+}
+
+function h2oManagedProfileSummary(runtime, currentUserReady) {
+  if (!currentUserReady) return '系统 oversea 默认订阅需要登录用户；Visitor 不会自动获得 admin 指派节点。';
+  const active = runtime?.activeSubscription || {};
+  if (active.source === 'custom' || active.source === 'external') {
+    return '当前使用自定义订阅；刷新系统订阅会获取管理员分配的节点，并保留当前使用的自定义订阅。';
+  }
+  if (active.syncStatus === 'initializing') return '正在为当前用户初始化系统 oversea 订阅；完成后会自动作为 H2O 默认连接。';
+  if (h2oSubscriptionUsable(active)) return '节点授权由管理员管理；刷新可获取最新的聚合与单节点订阅，保留已有节点授权。';
+  return '已登录；刷新可获取系统订阅。需要调整节点授权请联系管理员，首次使用会自动获取默认节点。';
+}
+
+function h2oSubscriptionStatusText(runtime, connected) {
+  if (!connected) return '等待 MX-H2I standalone channel。';
+  if (!h2oHasUsableSubscription(runtime)) {
+    const subscription = runtime.activeSubscription || {};
+    if (subscription.requiresUser && !isUserIdentity()) return '当前系统 oversea 订阅等待登录用户，暂不可启动 H2O。';
+    if (subscription.syncStatus === 'initializing') return '正在为当前用户初始化系统 oversea 订阅，请稍等。';
+    if (subscription.status === 'pending') {
+      return subscription.syncStatus === 'pending-runtime-sync'
+        ? '当前用户已有 oversea entitlement，但 oversea runtime 尚未同步完成。'
+        : '当前用户还没有可用的系统 oversea 订阅，H2O 会尝试自动分配；失败后可手动添加订阅。';
+    }
+    if (subscription.status === 'error') {
+      return subscription.errorMessage || '获取 Internal oversea 订阅失败，请检查 k8s admin 的 Oversea 状态。';
+    }
+    return '当前订阅未就绪，先在订阅页选择可用 profile。';
+  }
+  const subscription = runtime.activeSubscription || {};
+  if (subscription.source === 'custom' || subscription.source === 'external') {
+    return '当前使用自定义订阅，H2O 已通过 broker-session 托管代理策略。';
+  }
+  return 'Internal broker 已连接，H2O 使用当前用户的 managed oversea profile。';
+}
+
+function h2oHasUsableSubscription(runtime) {
+  return h2oSubscriptionUsable(runtime?.activeSubscription);
+}
+
+function h2oCanAutoHydrateSubscription(runtime) {
+  const subscription = runtime?.activeSubscription || {};
+  return isUserIdentity()
+    && (subscription.requiresUser === true || subscription.source === 'internal' || /^mx-h2i:\/\//i.test(String(subscription.url || '')));
+}
+
+function h2oSubscriptionUsable(item) {
+  if (!item) return false;
+  if (item.requiresUser && !isUserIdentity()) return false;
+  if (['login-required', 'pending', 'error'].includes(item.status)) return false;
+  if (!h2oLooksLikeHttpSubscriptionUrl(item.url)) return false;
+  return Number(item.nodes || 0) > 0;
+}
+
+function h2oSubscriptionCanDelete(item) {
+  if (!item) return false;
+  if (item.requiresUser || item.source === 'internal') return false;
+  return !['h2o-default', 'h2o-oversea-backup'].includes(String(item.id || ''));
+}
+
+function isUserIdentity() {
+  return state?.identity?.kind === 'user'
+    || state?.connection?.mode === 'employee'
+    || h2oSubjectLooksLikeUser(state?.auth?.subject)
+    || h2oSubjectLooksLikeUser(state?.connection?.subject);
+}
+
+function h2oSubjectLooksLikeUser(subject) {
+  return String(subject || '').trim().startsWith('user:');
+}
+
+function h2oLooksLikeHttpSubscriptionUrl(url) {
+  return /^https?:\/\//i.test(String(url || '').trim());
+}
+
+function h2oRuntime(app = state.apps?.h2o) {
+  const runtime = app?.runtime && typeof app.runtime === 'object' ? app.runtime : {};
+  const ports = runtime.ports && typeof runtime.ports === 'object' ? runtime.ports : {};
+  const activeSeed = runtime.activeSubscription && typeof runtime.activeSubscription === 'object'
+    ? runtime.activeSubscription
+    : {};
+  const subscriptions = normalizeH2oSubscriptions(runtime.subscriptions, activeSeed);
+  const activeId = runtime.activeSubscriptionId || activeSeed.id || subscriptions[0]?.id || 'h2o-default';
+  const activeSubscription = subscriptions.find((item) => item.id === activeId) || subscriptions[0] || normalizeH2oSubscription(activeSeed);
+  const rawStatus = runtime.status || (runtime.running === true ? 'running' : 'stopped');
+  const status = runtime.running !== true && rawStatus === 'ready' && !h2oSubscriptionUsable(activeSubscription)
+    ? 'subscription-required'
+    : rawStatus;
+  return {
+    kind: 'h2o-plugin',
+    mode: normalizeH2oModeUi(runtime.mode),
+    tuning: h2oTuning(runtime),
+    nodes: Array.isArray(runtime.nodes) ? runtime.nodes.filter((item) => item && item.name) : [],
+    selectedNode: runtime.selectedNode || null,
+    running: runtime.running === true,
+    status,
+    tunInstalled: runtime.tunInstalled === true,
+    adminUrl: runtime.adminUrl || 'http://127.0.0.1:23456',
+    ports: {
+      admin: normalizePortUi(ports.admin, 23456),
+      controller: normalizePortUi(ports.controller, 23457),
+      mixed: normalizePortUi(ports.mixed, 23458),
+      dns: normalizePortUi(ports.dns, 1053)
+    },
+    activeSubscription,
+    activeSubscriptionId: activeSubscription.id,
+    subscriptions,
+    rules: normalizeH2oRules(runtime.rules),
+    metrics: normalizeH2oMetrics(runtime.metrics),
+    clashLink: normalizeH2oClashLinkUi(runtime.clashLink),
+    activeNode: runtime.activeNode || null,
+    startedAt: runtime.startedAt || null,
+    lastAppliedAt: runtime.lastAppliedAt || null
+  };
+}
+
+function normalizeH2oModeUi(value) {
+  const text = String(value || '').trim();
+  if (text === 'global') return 'app-global';
+  if (text === 'rule') return 'app-rule';
+  if (text === 'tun' || text === 'system-fakeip' || text === 'fakeip' || text === 'fake-ip') return 'system-tun';
+  if (text === 'direct') return 'app-global';
+  return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-global';
+}
+
+function normalizeH2oSubscriptions(value, activeSeed) {
+  const rows = Array.isArray(value) ? value : [];
+  const subscriptions = rows
+    .map((item) => normalizeH2oSubscription(item))
+    .filter((item) => item && !h2oShouldDropSubscription(item));
+  const active = normalizeH2oSubscription(activeSeed);
+  if (!h2oShouldDropSubscription(active) && !subscriptions.some((item) => item.id === active.id)) subscriptions.unshift(active);
+  if (!subscriptions.some((item) => item.id === 'h2o-default')) {
+    subscriptions.unshift(normalizeH2oSubscription({
+      id: 'h2o-default',
+      name: 'System Oversea 默认订阅',
+      url: 'mx-h2i://managed/home-to-oversea',
+      nodes: 6,
+      latencyMs: 42,
+      status: isUserIdentity() ? 'pending' : 'login-required',
+      source: 'internal',
+      requiresUser: true,
+      syncStatus: isUserIdentity() ? 'missing-entitlement' : 'login-required',
+      errorMessage: isUserIdentity() ? '当前用户还没有可用的系统 oversea 订阅。' : '系统 oversea 订阅需要先登录员工用户。'
+    }));
+  }
+  return orderH2oSubscriptions(subscriptions).slice(0, 12);
+}
+
+function normalizeH2oSubscription(input) {
+  const row = input && typeof input === 'object' ? input : {};
+  const id = String(row.id || 'h2o-default');
+  const source = String(row.source || 'internal');
+  const requiresUser = row.requiresUser === true || (source !== 'demo' && source !== 'custom' && source !== 'external' && id.startsWith('h2o-'));
+  let status = requiresUser && !isUserIdentity()
+    ? 'login-required'
+    : String(row.status || (requiresUser && source === 'internal' ? 'pending' : 'ready'));
+  if (requiresUser && isUserIdentity() && status === 'login-required') {
+    status = source === 'internal' || h2oIsManagedSubscriptionIdUi(id) ? 'pending' : status;
+  }
+  const rawSyncStatus = row.syncStatus || null;
+  const syncStatus = status === 'pending' && rawSyncStatus === 'login-required' ? 'missing-entitlement' : rawSyncStatus;
+  const rawErrorMessage = row.errorMessage || null;
+  const errorMessage = status === 'pending' && /登录员工用户|等待登录|login/i.test(String(rawErrorMessage || ''))
+    ? '当前用户还没有可用的系统 oversea 订阅。'
+    : rawErrorMessage;
+  return {
+    id,
+    name: String(row.name || 'System Oversea 默认订阅'),
+    url: String(row.url || 'mx-h2i://managed/home-to-oversea'),
+    nodes: normalizeNonNegativeUi(row.nodes, 6),
+    latencyMs: normalizeNonNegativeUi(row.latencyMs, 42),
+    status,
+    source,
+    requiresUser,
+    assignable: row.assignable !== false,
+    entitlementId: row.entitlementId || null,
+    siteIds: Array.isArray(row.siteIds) ? row.siteIds.map((item) => String(item || '').trim()).filter(Boolean) : [],
+    syncStatus,
+    errorMessage,
+    yamlBytes: normalizeNonNegativeUi(row.yamlBytes, 0),
+    auth: normalizeH2oSubscriptionAuth(row.auth),
+    headers: normalizeStringRecordUi(row.headers),
+    pinnedAt: row.pinnedAt || null,
+    lastUpdatedAt: row.lastUpdatedAt || new Date().toISOString()
+  };
+}
+
+/**
+ * 聚合订阅走 Bearer，H2O 自己能取，但**复制到 Clash 一定 404**：
+ * /internal/v1/user-center/* 不在公网 edge 的 allowlist 里，Clash 也发不了 Bearer。
+ * 单站点订阅（site-slots/...）则是 URL 即凭据，可以直接复制。
+ */
+function h2oSubscriptionNeedsBearer(item) {
+  return /\/internal\/v1\/user-center\//.test(String(item?.url || ''));
+}
+
+function normalizeH2oClashLinkUi(value) {
+  const row = value && typeof value === 'object' ? value : {};
+  const subject = String(state?.auth?.subject || state?.connection?.subject || '');
+  const userId = state?.auth?.user?.userId || (subject.startsWith('user:') ? subject.slice(5) : subject);
+  const status = row.userId && row.userId === userId ? row.status || 'unverified' : 'unverified';
+  const url = row.url && status === 'verified' ? String(row.url) : null;
+  const issuedAt = row.issuedAt ? String(row.issuedAt) : null;
+  const expiresAt = row.expiresAt ? String(row.expiresAt) : null;
+  if (!url && !issuedAt && !expiresAt) return null;
+  return { url, issuedAt, expiresAt, status, userId: row.userId || null };
+}
+
+/**
+ * 默认订阅那条地址要登录态，Clash 用不了；这里直接给出 token 在路径里的等价地址。
+ * 水合时已经自动备好，所以正常情况下用户打开就能复制，不用先点按钮。
+ */
+function renderH2oClashLink(runtime, connected, currentUserReady, busyAction) {
+  const link = runtime.clashLink || null;
+  const busy = busyAction === 'issueH2oClashLink';
+  const disabled = !connected || !currentUserReady || busy;
+  const issuedElsewhere = link?.status === 'remote-only';
+  return `
+    <div class="h2o-clash-link">
+      <small>上面那条要登录态，复制到 Clash 会 404。Clash 请用下面这条（token 在地址里，直接 GET）。</small>
+      ${link?.url ? `<code data-clash-link>${escapeHtml(link.url)}</code>` : ''}
+      ${issuedElsewhere
+        ? '<small>这个账号已经有一条链接，但明文只在生成时显示过一次，本机没有副本。重新生成会让旧链接立即失效。</small>'
+        : ''}
+      ${link?.status === 'unverified' ? '<small>尚未核验分享链接，请点“刷新系统订阅”。核验期间不提供旧链接复制。</small>' : ''}
+      ${link?.status === 'missing' ? '<small>原分享链接已失效。可在此重新生成；无需重新分配节点。</small>' : ''}
+      <div class="toolbar-actions">
+        <button class="secondary-button" type="button" data-action="issueH2oClashLink" ${disabled ? 'disabled' : ''}>
+          ${busy ? '生成中' : link?.url || issuedElsewhere ? '重新生成' : '生成 Clash 链接'}
+        </button>
+        ${link?.url ? '<button class="secondary-button" type="button" data-action="copyH2oClashLink">复制</button>' : ''}
+      </div>
+      ${link?.expiresAt ? `<small>有效期至 ${escapeHtml(formatDateTime(link.expiresAt))}${link.url ? '；重新生成会让旧链接立即失效。' : ''}</small>` : ''}
+    </div>
+  `;
+}
+
+function h2oIsManagedSubscriptionIdUi(id) {
+  const text = String(id || '');
+  return text === 'h2o-default'
+    || text === 'h2o-oversea-backup'
+    || /^h2o-oversea-/i.test(text);
+}
+
+function h2oShouldDropSubscription(item) {
+  return String(item?.id || '') === 'h2o-oversea-backup';
+}
+
+function orderH2oSubscriptions(subscriptions) {
+  return subscriptions
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const leftPinned = Date.parse(left.item.pinnedAt || '');
+      const rightPinned = Date.parse(right.item.pinnedAt || '');
+      const leftHasPin = Number.isFinite(leftPinned);
+      const rightHasPin = Number.isFinite(rightPinned);
+      if (leftHasPin && rightHasPin) return rightPinned - leftPinned || left.index - right.index;
+      if (leftHasPin) return -1;
+      if (rightHasPin) return 1;
+      return left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
+
+function normalizeH2oSubscriptionAuth(value) {
+  const row = value && typeof value === 'object' ? value : {};
+  if (String(row.type || '').trim().toLowerCase() === 'basic') {
+    return {
+      type: 'basic',
+      username: String(row.username || ''),
+      password: String(row.password || '')
+    };
+  }
+  return { type: 'none', username: null, password: null };
+}
+
+function normalizeH2oRules(value) {
+  const rows = Array.isArray(value) ? value : [];
+  const normalized = rows.map((item) => {
+    const row = item && typeof item === 'object' ? item : {};
+    const host = String(row.host || '').trim();
+    if (!host) return null;
+    const kind = normalizeH2oRuleKind(row.kind || policyToRuleKind(row.policy));
+    return {
+      id: String(row.id || ruleIdFromHost(host)),
+      host,
+      target: String(row.target || defaultRuleTarget(kind)),
+      kind,
+      enabled: row.enabled !== false,
+      source: String(row.source || 'managed'),
+      hitCount: normalizeNonNegativeUi(row.hitCount, 0)
+    };
+  }).filter(Boolean);
+  if (normalized.length) return normalized.slice(0, 96);
+  return [
+    { id: 'google', host: 'google.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:google', hitCount: 0 },
+    { id: 'youtube', host: 'youtube.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:youtube', hitCount: 0 },
+    { id: 'telegram', host: 'telegram.org', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:telegram', hitCount: 0 },
+    { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '全局/TUN 黑名单', kind: 'block', enabled: true, source: 'builtin', hitCount: 0 }
+  ];
+}
+
+function normalizeH2oMetrics(value) {
+  const row = value && typeof value === 'object' ? value : {};
+  return {
+    uploadBytes: normalizeNonNegativeUi(row.uploadBytes, 0),
+    downloadBytes: normalizeNonNegativeUi(row.downloadBytes, 0),
+    connections: normalizeNonNegativeUi(row.connections, 0),
+    lastProxyAppliedAt: row.lastProxyAppliedAt || null
+  };
+}
+
+function normalizePortUi(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function normalizeNonNegativeUi(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : fallback;
+}
+
+function normalizeStringRecordUi(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value)
+    .map(([key, item]) => [String(key || '').trim(), String(item || '').trim()])
+    .filter(([key, item]) => key && item));
+}
+
+function readH2oPortFields() {
+  const ports = {};
+  for (const input of root.querySelectorAll('[data-h2o-port]')) {
+    ports[input.dataset.h2oPort] = Number(input.value || 0);
+  }
+  return ports;
+}
+
+function readH2oRuleForm(form) {
+  const payload = Object.fromEntries(new FormData(form).entries());
+  return {
+    host: String(payload.host || ''),
+    kind: String(payload.kind || 'allow')
+  };
+}
+
+function defaultH2oSubscriptionDraft() {
+  return {
+    name: '',
+    url: '',
+    authType: 'none',
+    username: '',
+    password: ''
+  };
+}
+
+function resetH2oSubscriptionDraft() {
+  h2oSubscriptionEditId = '';
+  h2oSubscriptionDraft = defaultH2oSubscriptionDraft();
+}
+
+function h2oSubscriptionDraftFromItem(item) {
+  return {
+    name: String(item?.name || ''),
+    url: String(item?.url || ''),
+    authType: item?.auth?.type === 'basic' ? 'basic' : 'none',
+    username: String(item?.auth?.username || ''),
+    password: String(item?.auth?.password || '')
+  };
+}
+
+function readH2oSubscriptionForm(form) {
+  const payload = Object.fromEntries(new FormData(form).entries());
+  return {
+    name: String(payload.name || ''),
+    url: String(payload.url || ''),
+    authType: String(payload.authType || 'none'),
+    username: String(payload.username || ''),
+    password: String(payload.password || '')
+  };
+}
+
+function readH2oTestUrl() {
+  const input = root.querySelector('[data-h2o-test-url]');
+  return input?.value || h2oTestUrlDraft || H2O_DEFAULT_TEST_URL;
+}
+
+function setH2oTestUrl(url) {
+  h2oTestUrlDraft = url || H2O_DEFAULT_TEST_URL;
+  const input = root.querySelector('[data-h2o-test-url]');
+  if (input) input.value = h2oTestUrlDraft;
+}
+
+function h2oRuleFromInput(input) {
+  const host = String(input?.host || '').trim() || 'example.com';
+  const kind = normalizeH2oRuleKind(input?.kind || policyToRuleKind(input?.policy));
+  return {
+    id: input?.id || ruleIdFromHost(host),
+    host,
+    target: defaultRuleTarget(kind),
+    kind,
+    enabled: true,
+    source: input?.source || 'manual',
+    hitCount: 0
+  };
+}
+
+function upsertH2oRule(rules, rule) {
+  const host = String(rule.host || '').toLowerCase();
+  const next = normalizeH2oRules(rules).filter((item) => (
+    item.id !== rule.id
+    && !(String(item.host || '').toLowerCase() === host && item.kind === rule.kind)
+  ));
+  return [rule, ...next].slice(0, 96);
+}
+
+function h2oRulePack(packId) {
+  return H2O_RULE_PACKS.find((pack) => pack.id === packId) || H2O_RULE_PACKS[0];
+}
+
+function h2oRulesFromPack(pack) {
+  return pack.hosts.map((host) => h2oRuleFromInput({
+    id: `pack-${pack.id}-${ruleIdFromHost(host)}`,
+    host,
+    kind: pack.kind,
+    source: `pack:${pack.id}`
+  }));
+}
+
+function addH2oRulePack(rules, pack) {
+  let next = normalizeH2oRules(rules);
+  for (const rule of h2oRulesFromPack(pack)) {
+    next = upsertH2oRule(next, rule);
+  }
+  return next;
+}
+
+function removeH2oRulePack(rules, pack) {
+  const hosts = new Set(pack.hosts.map((host) => String(host || '').toLowerCase()));
+  return normalizeH2oRules(rules).filter((rule) => (
+    rule.source !== `pack:${pack.id}`
+    && !hosts.has(String(rule.host || '').toLowerCase())
+  ));
+}
+
+function h2oCustomSubscriptionFromInput(input) {
+  const parsed = parseH2oCustomSubscriptionUrl(input?.url);
+  if (!parsed) return null;
+  const url = parsed.url;
+  const name = String(input?.name || '').trim() || h2oSubscriptionNameFromUrl(url);
+  const authType = String(input?.authType || '').trim().toLowerCase();
+  const embeddedUsername = parsed.username;
+  const embeddedPassword = parsed.password;
+  const authUsername = String(input?.username || '').trim() || embeddedUsername;
+  const authPassword = String(input?.password || '') || embeddedPassword;
+  const auth = authType === 'basic' || embeddedUsername || embeddedPassword
+    ? {
+      type: 'basic',
+      username: authUsername,
+      password: authPassword
+    }
+    : { type: 'none', username: null, password: null };
+  return normalizeH2oSubscription({
+    id: input?.id || `custom-${subscriptionIdFromText(url)}`,
+    name,
+    url,
+    nodes: 1,
+    latencyMs: 0,
+    status: 'ready',
+    source: 'custom',
+    requiresUser: false,
+    assignable: true,
+    auth,
+    syncStatus: 'saved',
+    errorMessage: null,
+    lastUpdatedAt: new Date().toISOString()
+  });
+}
+
+function h2oCustomSubscriptionValidationError(input) {
+  const rawUrl = String(input?.url || '').trim();
+  if (!rawUrl) return '请先填写订阅链接。';
+  const parsed = parseH2oCustomSubscriptionUrl(rawUrl);
+  if (!parsed) return '订阅链接必须是有效的 http 或 https 地址。';
+  const authType = String(input?.authType || '').trim().toLowerCase();
+  const needsBasic = authType === 'basic' || parsed.username || parsed.password;
+  if (needsBasic) {
+    const username = String(input?.username || '').trim() || parsed.username;
+    const password = String(input?.password || '') || parsed.password;
+    if (!username || !password) return 'Basic Auth 订阅需要填写用户名和密码，或在 URL 中带完整账号密码。';
+  }
+  return '';
+}
+
+function parseH2oCustomSubscriptionUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch (_err) {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  const username = safeDecodeUrlPart(parsed.username);
+  const password = safeDecodeUrlPart(parsed.password);
+  parsed.username = '';
+  parsed.password = '';
+  return { url: parsed.toString(), username, password };
+}
+
+function safeDecodeUrlPart(value) {
+  const text = String(value || '');
+  if (!text) return '';
+  try {
+    return decodeURIComponent(text);
+  } catch (_err) {
+    return text;
+  }
+}
+
+function upsertH2oSubscription(subscriptions, subscription) {
+  const normalized = normalizeH2oSubscriptions(subscriptions, subscription);
+  const normalizedUrl = normalizedSubscriptionUrlForCompare(subscription.url);
+  const next = normalized.filter((item) => (
+    item.id !== subscription.id
+    && normalizedSubscriptionUrlForCompare(item.url) !== normalizedUrl
+  ));
+  return [subscription, ...next].slice(0, 12);
+}
+
+function pinH2oSubscription(subscriptions, subscriptionId) {
+  const normalized = normalizeH2oSubscriptions(subscriptions);
+  const target = normalized.find((item) => item.id === subscriptionId);
+  if (!target) return normalized;
+  const pinned = { ...target, pinnedAt: new Date().toISOString() };
+  return [pinned, ...normalized.filter((item) => item.id !== subscriptionId)].slice(0, 12);
+}
+
+function normalizedSubscriptionUrlForCompare(url) {
+  const parsed = parseH2oCustomSubscriptionUrl(url);
+  return parsed?.url || String(url || '');
+}
+
+function h2oSubscriptionNameFromUrl(url) {
+  try {
+    return new URL(url).hostname || 'Custom Oversea 订阅';
+  } catch (_err) {
+    return 'Custom Oversea 订阅';
+  }
+}
+
+function subscriptionIdFromText(value) {
+  const safe = String(value || 'subscription')
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48);
+  return safe || 'subscription';
+}
+
+function ruleIdFromHost(host) {
+  return String(host || 'rule').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'rule';
+}
+
+function defaultRuleTarget(kind) {
+  return kind === 'block' ? '全局/TUN 黑名单' : 'App 模式白名单';
+}
+
+function normalizeH2oRuleKind(value) {
+  return String(value || '').trim() === 'block' ? 'block' : 'allow';
+}
+
+function policyToRuleKind(policy) {
+  return ['internal-direct', 'direct', 'block', 'blacklist'].includes(String(policy || '').trim()) ? 'block' : 'allow';
+}
+
+function h2oLogRows(runtime, app) {
+  const logs = Array.isArray(app.logs) ? app.logs : [];
+  const synthetic = [
+    runtime.lastAppliedAt ? { level: 'info', message: `Runtime applied: ${h2oModeLabel(runtime.mode)}`, at: runtime.lastAppliedAt } : null,
+    runtime.startedAt ? { level: 'info', message: 'H2O runtime started.', at: runtime.startedAt } : null,
+    runtime.metrics.lastProxyAppliedAt ? { level: 'info', message: 'Broker proxy policy applied.', at: runtime.metrics.lastProxyAppliedAt } : null
+  ].filter(Boolean);
+  return [...logs, ...synthetic].slice(0, 20);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+function appUserTags(app) {
+  const tags = [];
+  if (app.category === 'network') tags.push('网络');
+  if (app.category === 'platform') tags.push('平台');
+  if (app.category === 'ops') tags.push('工具');
+  if (app.installed) tags.push('已安装');
+  if (app.latestVersion && app.latestVersion !== (app.installedVersion || app.version)) tags.push('可更新');
+  if (!tags.length) tags.push('应用');
+  return tags.slice(0, 3);
+}
+
+function appUserStatus(app) {
+  if (appNeedsAttention(app)) return '需要处理';
+  if (app.status === 'reserved') return '即将推出';
+  if (app.runtimeState === 'running') return '运行中';
+  if (app.installed && app.enabled) return '已安装';
+  if (app.installed) return '已缓存';
+  return '可安装';
+}
+
+function appUserFeatures(app) {
+  if (app.appId === 'h2o') {
+    return [
+      { title: 'Home To Oversea', detail: '按 App、全局或系统 TUN 模式托管出海策略。' },
+      { title: '订阅和规则', detail: '沿用类 Clash 的订阅、规则、端口和日志模型。' },
+      { title: '共享底座', detail: '通过 MX-H2I broker-session 继承用户、网络和权限。' }
+    ];
+  }
+  if (app.appId === 'appcenter') {
+    return [
+      { title: '应用管理', detail: '安装、打开和更新内置应用。' },
+      { title: '轻量更新', detail: '应用以 package 形式分发，重启后即可生效。' }
+    ];
+  }
+  if (app.appId === 'diagnostics') {
+    return [
+      { title: '问题排查', detail: '网络和更新检查集中在这里。' },
+      { title: '日志收集', detail: '出现错误时可复制给开发人员。' }
+    ];
+  }
+  return [
+    { title: '预留应用', detail: '管理员开放后会出现在这里。' }
+  ];
+}
+
+function renderAppRecentLogs(app, verbose = false) {
+  const logs = Array.isArray(app.logs) ? app.logs : [];
+  const errorMessage = appVisibleErrorMessage(app);
+  if (!logs.length && !errorMessage) return '';
+  const rows = errorMessage
+    ? [{ level: 'error', message: errorMessage, at: app.lastAction || new Date().toISOString() }, ...logs]
+    : logs;
+  return `
+    <div class="app-log-list ${verbose ? 'is-verbose' : ''}">
+      <strong>${verbose ? 'Logs' : '最近状态'}</strong>
+      ${rows.slice(0, verbose ? 8 : 3).map((item) => `
+        <div data-level="${escapeAttr(item.level || 'info')}">
+          <span>${escapeHtml(item.message)}</span>
+          <small>${escapeHtml(formatDateTime(item.at))}</small>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function appNeedsAttention(app) {
+  if (!app) return false;
+  if (h2oHasIdleProxyError(app)) return false;
+  return Boolean(app.errorMessage || app.runtimeState === 'error' || app.status === 'error');
+}
+
+function appVisibleErrorMessage(app) {
+  if (h2oHasIdleProxyError(app)) return '';
+  return app?.errorMessage || '';
+}
+
+function h2oHasIdleProxyError(app) {
+  if (app?.appId !== 'h2o' || !app.errorMessage) return false;
+  return /mixed-port|未监听|proxy-unavailable|H2O mihomo 恢复失败/i.test(String(app.errorMessage || ''));
+}
+
+function appPrimaryAction(app, connected) {
+  if (app.appId === 'appcenter') {
+    return { action: 'show-appcenter', label: app.installed ? '打开' : '安装', disabled: !connected || busyAction === 'installAppCenter' };
+  }
+  if (app.appId === 'h2o') {
+    if (app.installed && app.enabled) {
+      return {
+        action: app.runtimeState === 'running' ? 'showH2oManager' : 'launchH2o',
+        label: app.runtimeState === 'running' ? '打开管理' : '启动',
+        disabled: !connected || busyAction === 'launchH2o'
+      };
+    }
+    return { action: 'enableH2o', label: '安装', disabled: !connected || !state.apps?.appcenter?.installed || busyAction === 'enableH2o' };
+  }
+  if (app.appId === 'diagnostics') {
+    return { action: 'checkUpdates', label: connected ? '检查' : '连接后检查', disabled: busyAction === 'checkUpdates' };
+  }
+  return { action: 'select-app', label: '即将推出', disabled: true };
+}
+
+function appStatusLabel(app) {
+  if (app.status === 'reserved') return 'Reserved';
+  if (app.runtimeState === 'running') return 'Running';
+  if (app.installed && app.enabled) return 'Installed';
+  if (app.installed) return 'Cached';
+  return 'Available';
+}
+
+function renderEmptyCatalog() {
+  return `
+    <div class="empty-catalog">
+      <strong>No app matched</strong>
+      <span>Try another keyword or category.</span>
+    </div>
+  `;
+}
+
+function formatDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function renderLegacyAppCenterView(connected) {
+  return `
+    <section class="appcenter-window">
+      <header class="appcenter-titlebar">
+        <div>
+          <p class="kicker">APPCENTER</p>
+          <h3>Installed through MX-H2I</h3>
+        </div>
+        <span class="status-pill" data-state="${connected ? 'connected' : 'idle'}">${connected ? 'channel ready' : 'offline'}</span>
+      </header>
+      <div class="appcenter-layout">
+        <aside class="appcenter-nav">
+          <button class="is-active" type="button">All Apps</button>
+          <button type="button">Network</button>
+          <button type="button">Platform</button>
+          <button type="button">Updates</button>
+        </aside>
+        <section class="catalog-grid">
+          ${renderCatalogCard('H2O', 'network', '规则、订阅、PAC、Split DNS', state.apps?.h2o?.enabled ? 'Enabled' : 'Available', 'enableH2o')}
+          ${renderCatalogCard('Diagnostics', 'ops', 'H/D/I/O trace、route plan、日志', 'Bundled', 'checkUpdates')}
+          ${renderCatalogCard('Luopan Bridge', 'reserved', '未来可切换到 luopan standalone channel', 'Reserved', 'show-launcher')}
+        </section>
+        <aside class="detail-panel">
+          <h4>H2O runtime</h4>
+          <div class="detail-list">
+            <div><span>Mode</span><strong>embed</strong></div>
+            <div><span>Channel</span><strong>mx-h2i</strong></div>
+            <div><span>Network scope</span><strong>broker-session</strong></div>
+            <div><span>Service context</span><strong>via MX-H2I</strong></div>
+            <div><span>Permissions</span><strong>network / dns / pac</strong></div>
+          </div>
+          <button class="primary-button block-button" type="button" data-action="enableH2o" ${!state.apps?.appcenter?.installed ? 'disabled' : ''}>
+            ${state.apps?.h2o?.enabled ? 'Open H2O' : 'Enable H2O'}
+          </button>
+        </aside>
+      </div>
+    </section>
+  `;
+}
+
+function renderFeedback() {
+  const feedback = state.feedback;
+  if (!feedback) return '';
+  return `<div class="feedback" data-tone="${escapeAttr(feedback.tone || 'info')}">${escapeHtml(feedback.message || '')}</div>`;
+}
+
+function renderOwner(owner) {
+  return `
+    <article class="owner-row ${owner.state === 'active' ? 'is-active' : ''}">
+      ${owner.productId === 'mx-h2i'
+        ? '<img class="brand-logo product-icon" src="./assets/mingxi-logo.png" alt="" aria-hidden="true" draggable="false" />'
+        : '<div class="product-icon">LP</div>'}
+      <div>
+        <strong>${escapeHtml(owner.displayName)}</strong>
+        <span>${escapeHtml(owner.productId)} / ${escapeHtml(owner.serviceVip || 'VIP 待分配')}</span>
+      </div>
+      <span class="status-pill" data-state="${escapeAttr(owner.state)}">${escapeHtml(owner.state)}</span>
+    </article>
+  `;
+}
+
+function renderAppCard(app, options) {
+  if (!app) return '';
+  return `
+    <article class="app-card ${app.enabled ? 'is-enabled' : ''}">
+      <div class="product-icon">${escapeHtml(app.appId === 'h2o' ? 'H2O' : 'APP')}</div>
+      <div>
+        <h4>${escapeHtml(app.displayName)}</h4>
+        <p>${escapeHtml(app.launcherMode)} via ${escapeHtml(app.standaloneChannelProductId)}</p>
+      </div>
+      <div class="app-card-meta">
+        <span>${escapeHtml(app.networkScope || (app.launcherMode === 'embed' ? 'broker-session' : app.serviceVip))}</span>
+        <strong>${escapeHtml(app.installed ? app.status : 'available')}</strong>
+      </div>
+      <button class="secondary-button" type="button" data-action="${escapeAttr(options.action)}" ${options.disabled ? 'disabled' : ''}>
+        ${escapeHtml(options.actionLabel)}
+      </button>
+    </article>
+  `;
+}
+
+function renderCatalogCard(name, category, summary, status, action) {
+  return `
+    <article class="catalog-card">
+      <div class="catalog-cover" data-category="${escapeAttr(category)}"></div>
+      <div>
+        <h4>${escapeHtml(name)}</h4>
+        <p>${escapeHtml(summary)}</p>
+      </div>
+      <div class="catalog-card-foot">
+        <span>${escapeHtml(status)}</span>
+        <button class="secondary-button" type="button" data-action="${escapeAttr(action)}">${status === 'Enabled' ? 'Open' : 'Select'}</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderUpdatePanel() {
+  const update = state.update || {};
+  const hasArtifact = Boolean(update.artifactUrl);
+  const downloading = Boolean(busyAction) || update.status === 'downloading';
+  const applyDisabled = !hasArtifact || downloading || ['staged', 'installer-opened'].includes(update.status);
+  const actionLabel = updateApplyLabel(update);
+  return `
+    <section class="panel update-panel">
+      <div class="panel-head">
+        <div>
+          <h3>Release / Gray</h3>
+          <p>由 Launcher standalone 更新器执行</p>
+        </div>
+        <button class="secondary-button" type="button" data-action="openAdmin">Admin</button>
+      </div>
+      <div class="metric-grid">
+        ${metric('Status', update.status)}
+        ${metric('Current', update.currentVersion)}
+        ${metric('Latest', update.latestVersion)}
+        ${metric('Policy', update.policy)}
+        ${metric('Gray', update.rolloutGroup)}
+        ${metric('Release', update.releaseId)}
+        ${metric('Artifact', update.artifactKind || update.componentKind)}
+        ${metric('Platform', [update.artifactPlatform, update.artifactArch].filter(Boolean).join(' / ') || '-')}
+        ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
+        ${metric('Delivery', updateDeliveryLabel(update.deliveryMode))}
+        ${metric('Matched by', rolloutMatchedByLabel(update))}
+      </div>
+      ${update.releaseNotes ? `
+        <div class="update-release-notes">
+          <span>Release notes</span>
+          <div class="release-notes-markdown">${renderReleaseNotesMarkdown(update.releaseNotes)}</div>
+        </div>
+      ` : ''}
+      <div class="update-actions">
+        ${renderCheckUpdatesButton('secondary-button')}
+        <button class="primary-button" type="button" data-action="applyUpdate" ${applyDisabled ? 'disabled' : ''}>${escapeHtml(actionLabel)}</button>
+        ${update.stagedPath ? '<button class="secondary-button" type="button" data-action="showDownloadedInstaller">打开文件夹</button>' : ''}
+        ${update.restartPrompt ? '<button class="secondary-button" type="button" data-action="restartApp">重启</button>' : ''}
+      </div>
+      ${renderUpdateProgress(update)}
+      ${renderReleaseHistory(update)}
+      ${renderRollbackSlots(update)}
+      ${update.reason ? `<p class="panel-note">${escapeHtml(update.reason)}</p>` : ''}
+    </section>
+  `;
+}
+
+function metric(label, value) {
+  return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '-')}</strong></div>`;
+}
+
+// docs/19 §6: the decision explains why this install did (not) receive the
+// release, so the panel can answer "为什么我(没)拿到这个版本".
+function rolloutMatchedByLabel(update) {
+  if (update.rolloutMatchedBy === 'target-list') return '指定用户/安装';
+  if (update.rolloutMatchedBy === 'percentage') {
+    return Number.isFinite(update.rolloutBucket) ? `灰度命中（bucket ${update.rolloutBucket}）` : '灰度命中';
+  }
+  if (update.rolloutMatchedBy === 'all') return '全部用户';
+  return '-';
+}
+
+function pathLabel(value) {
+  if (value === 'hdi-relay') return 'H2I via Domestic relay';
+  if (value === 'h2i-direct') return 'H2I direct';
+  if (value === 'h2i-hybrid') return 'H2I hybrid';
+  return value || '-';
+}
+
+function compactList(value) {
+  const items = Array.isArray(value) ? value : [];
+  if (!items.length) return '-';
+  const text = items.map((item) => {
+    if (typeof item === 'string') return item;
+    if (item && typeof item === 'object') return item.cidr || item.destination || item.interfaceName || JSON.stringify(item);
+    return String(item || '');
+  }).filter(Boolean).join(', ');
+  return text.length > 90 ? `${text.slice(0, 87)}...` : text;
+}
+
+function compactText(value, limit = 90) {
+  const text = String(value || '').trim();
+  if (!text) return '-';
+  return text.length > limit ? `${text.slice(0, Math.max(0, limit - 3))}...` : text;
+}
+
+function connectionCaption() {
+  if (state.connection?.diagnostics?.applicationAccessDenied) return '已停止后续操作 · 请联系管理员或更换账号';
+  const connection = state.connection || {};
+  if (busyAction === 'disconnect') return '正在等待一次系统授权，以原子停止 WireGuard 并恢复 PAC / split DNS';
+  if (anonymousRecoveryBlockedByPolicy()) return ANONYMOUS_LOGIN_DISABLED_MESSAGE;
+  if (networkOperationPaused()) return `${connection.localIp || '当前网络'} / 已停止后续恢复，现有健康连接保持中`;
+  if (feishuAuthFlow() && feishuAuthStage() !== 'connecting') {
+    return connection.mode === 'guest' && connection.localIp
+      ? `${connection.localIp} / 等待飞书授权，访客连接保持中`
+      : '等待系统浏览器完成飞书授权';
+  }
+  if (isConnectionPending()) {
+    if (connection.state === 'lease-only') return `${connection.localIp || '已分配租约'} / 等待系统授权完成`;
+    if (feishuAuthStage() === 'connecting') return `${connection.localIp || '飞书员工网络'} / 正在切换员工通道`;
+    if (busyAction === 'login-employee' && connection.mode === 'guest') return `${connection.localIp || '访客网络'} / 正在验证员工身份，访客连接保持中`;
+    return '正在准备 WireGuard、DNS、PAC 和权限上下文';
+  }
+  if (connection.state === 'connecting') return '正在准备 WireGuard、DNS、PAC 和权限上下文';
+  if (connection.state === 'connected') return `${connection.localIp} / ${connection.routePolicy}`;
+  if (connection.state === 'tunnel-only') return `${connection.localIp} / 保留隧道 / ${connection.health?.internalApi === 'ready' ? 'Internal ready' : 'Internal 校验中'}`;
+  if (connection.state === 'lease-only') return `${connection.localIp} / 租约保留 / ${connection.health?.wireGuard === 'ready' ? '等待系统授权' : 'WG 校验中'}`;
+  if (connection.state === 'network-unavailable') return `${connection.localIp || '未分配'} / network unavailable`;
+  if (connection.state === 'server-unavailable') return `${connection.localIp || '未分配'} / server redeploying`;
+  if (connection.state === 'forbidden') return `${connection.localIp || '未分配'} / blocked`;
+  return 'standalone launcher channel owner';
+}
+
+function readConfigForm(form) {
+  const formData = new FormData(form);
+  return {
+    bootstrapApiBaseUrl: String(formData.get('bootstrapApiBaseUrl') || ''),
+    internalApiBaseUrl: String(formData.get('internalApiBaseUrl') || ''),
+    domesticRelayHost: String(formData.get('domesticRelayHost') || ''),
+    domesticRelayPort: Number(formData.get('domesticRelayPort') || 0),
+    sdkGatewayBaseUrl: String(formData.get('sdkGatewayBaseUrl') || ''),
+    hostResolve: String(formData.get('hostResolve') || ''),
+    bootstrapResolveMode: String(formData.get('bootstrapResolveMode') || ''),
+    bootstrapDnsServers: String(formData.get('bootstrapDnsServers') || ''),
+    routePathPreference: String(formData.get('routePathPreference') || ''),
+    splitDnsDomains: String(formData.get('splitDnsDomains') || ''),
+    releaseChannel: String(formData.get('releaseChannel') || ''),
+    releaseUpdateStrategy: String(formData.get('releaseUpdateStrategy') || 'installer'),
+    rolloutGroup: String(formData.get('rolloutGroup') || ''),
+    useLocalEngineResources: formData.get('useLocalEngineResources') === 'on',
+    restartAfterCodeUpdate: formData.get('restartAfterCodeUpdate') === 'on'
+  };
+}
+
+function option(value, selected) {
+  return `<option value="${escapeAttr(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(value)}</option>`;
+}
+
+async function copyInstallationId() {
+  const installId = state.installation?.installId;
+  if (!installId) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(installId);
+    } else {
+      const input = document.createElement('textarea');
+      input.value = installId;
+      input.setAttribute('readonly', '');
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    }
+    state = {
+      ...state,
+      feedback: {
+        tone: 'success',
+        message: `installId 已复制：${installId}`
+      }
+    };
+  } catch {
+    state = {
+      ...state,
+      feedback: {
+        tone: 'warning',
+        message: 'installId 复制失败，请手动选中本机身份里的 installId。'
+      }
+    };
+  }
+  render();
+}
+
+async function copyH2oClashLink(url) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      const input = document.createElement('textarea');
+      input.value = url;
+      input.setAttribute('readonly', '');
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    }
+    state = { ...state, feedback: { tone: 'success', message: 'Clash 订阅链接已复制。' } };
+  } catch {
+    // 链接就在上面的 code 块里，手动选中即可，不必把 URL 再塞进提示。
+    state = { ...state, feedback: { tone: 'warning', message: '复制失败，请手动选中上面的订阅链接。' } };
+  }
+  render();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function mockH2oManagedSubscriptionUrl() {
+  return 'http://10.88.88.88:18090/internal/v1/user-center/users/mock/oversea/subscription.yaml';
+}
+
+function createMockApi() {
+  let mockState = {
+    config: {
+      bootstrapApiBaseUrl: 'https://h2i.minsight-ai.com',
+      internalApiBaseUrl: 'http://10.88.88.88:18090',
+      domesticRelayHost: '116.62.51.154',
+      domesticRelayPort: 51280,
+      sdkGatewayBaseUrl: 'https://h2i.minsight-ai.com/internal/v1/sdk',
+      hostResolve: 'h2i.minsight-ai.com=116.62.51.154',
+      bootstrapResolveMode: 'env-first',
+      bootstrapDnsServers: '',
+      routePathPreference: 'auto',
+      splitDnsDomains: 'mxinfo-inc.cn,h2i.mxinfo-inc.cn',
+      releaseChannel: 'stable',
+      releaseUpdateStrategy: 'installer',
+      rolloutGroup: 'staff-ring',
+      useLocalEngineResources: true,
+      restartAfterCodeUpdate: true
+    },
+    connection: {
+      state: 'idle',
+      mode: 'guest',
+      hasLeaseCapability: false,
+      localIp: null,
+      routePolicy: 'none',
+      subject: null,
+      connectedAt: null,
+      health: {
+        wireGuard: 'idle',
+        domesticRelay: 'idle',
+        internalApi: 'idle',
+        splitDns: 'idle',
+        appBroker: 'idle'
+      }
+    },
+    identity: {
+      kind: 'anonymous',
+      provider: null,
+      displayName: 'Visitor',
+      account: null,
+      scopes: ['auth.read']
+    },
+    apps: {
+      appcenter: {
+        appId: 'appcenter',
+        displayName: 'AppCenter',
+        category: 'platform',
+        description: '内置应用市场，负责应用发现、安装、权限申请和版本状态。',
+        packageName: '@qpjoy/electron-launcher-appcenter',
+        launcherMode: 'embed',
+        standaloneChannelProductId: 'mx-h2i',
+        networkScope: 'broker-session',
+        serviceVip: '10.88.100.9',
+        version: '0.1.0',
+        latestVersion: '0.1.0',
+        updatePolicy: 'launcher-managed',
+        permissions: ['auth.read', 'appcenter.read'],
+        installSource: 'builtin',
+        installPath: 'builtin://appcenter',
+        runtimeState: 'idle',
+        logs: [],
+        entrypoints: {
+          desktop: 'app://appcenter/index.html',
+          settings: 'app://appcenter/settings.html'
+        },
+        installed: false,
+        enabled: false,
+        status: 'available'
+      },
+      h2o: {
+        appId: 'h2o',
+        displayName: 'H2O',
+        fullName: 'Home To Oversea',
+        category: 'network',
+        description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
+        packageName: '@qpjoy/electron-launcher-app-h2o',
+        launcherMode: 'embed',
+        standaloneChannelProductId: 'mx-h2i',
+        networkScope: 'broker-session',
+        serviceVip: '10.88.100.10',
+        version: '0.1.0',
+        latestVersion: '0.1.0',
+        updatePolicy: 'launcher-managed',
+        permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy', 'system:exec:mihomo'],
+        requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'network.tunnel.mihomo', 'app-center-runtime'],
+        manifest: {
+          appId: 'h2o',
+          productId: 'h2o',
+          displayName: 'H2O',
+          description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
+          packageName: '@qpjoy/electron-launcher-app-h2o',
+          category: 'network',
+          launcherMode: 'embed',
+          protocolVersion: '2',
+          runtimeContractVersion: '0.1',
+          requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'network.tunnel.mihomo', 'app-center-runtime'],
+          network: { scope: 'broker-session' },
+          runtimeDependencies: {
+            packages: ['@qpjoy/electron-plugin-tunnel', '@qpjoy/electron-core-mihomo'],
+            optionalPackages: [
+              '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64',
+              '@qpjoy/electron-plugin-tunnel-engine-darwin-x64',
+              '@qpjoy/electron-plugin-tunnel-engine-linux-arm64',
+              '@qpjoy/electron-plugin-tunnel-engine-linux-x64',
+              '@qpjoy/electron-plugin-tunnel-engine-win32-x64'
+            ]
+          },
+          embed: { standaloneChannelProductId: 'mx-h2i', launchWithoutBroker: 'blocked' }
+        },
+        installSource: 'npm',
+        installPath: null,
+        runtime: {
+          kind: 'h2o-plugin',
+          mode: 'app-global',
+          running: false,
+          status: 'stopped',
+          tunInstalled: false,
+          adminUrl: 'http://127.0.0.1:23456',
+          ports: { admin: 23456, controller: 23457, mixed: 23458, dns: 1053 },
+          subscriptions: [
+            { id: 'h2o-default', name: 'System Oversea 默认订阅', url: 'mx-h2i://managed/home-to-oversea', nodes: 6, latencyMs: 42, status: 'login-required', source: 'internal', requiresUser: true, lastUpdatedAt: new Date().toISOString() }
+          ],
+          activeSubscriptionId: 'h2o-default',
+          activeSubscription: {
+            id: 'h2o-default',
+            name: 'System Oversea 默认订阅',
+            url: 'mx-h2i://managed/home-to-oversea',
+            nodes: 6,
+            latencyMs: 42,
+            status: 'login-required',
+            source: 'internal',
+            requiresUser: true,
+            lastUpdatedAt: new Date().toISOString()
+          },
+          rules: [
+            { id: 'google', host: 'google.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:google', hitCount: 0 },
+            { id: 'youtube', host: 'youtube.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:youtube', hitCount: 0 },
+            { id: 'telegram', host: 'telegram.org', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:telegram', hitCount: 0 },
+            { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '全局/TUN 黑名单', kind: 'block', enabled: true, source: 'builtin', hitCount: 0 }
+          ],
+          metrics: { uploadBytes: 0, downloadBytes: 0, connections: 0, lastProxyAppliedAt: null },
+          startedAt: null,
+          lastAppliedAt: null
+        },
+        runtimeState: 'idle',
+        logs: [],
+        entrypoints: {
+          desktop: 'app://h2o/index.html',
+          settings: 'app://h2o/settings.html',
+          dev: 'workspace:demos/mx-app-h2o'
+        },
+        installed: false,
+        enabled: false,
+        status: 'available'
+      }
+    },
+    update: {
+      status: 'idle',
+      currentVersion: '0.1.0',
+      latestVersion: '0.1.0',
+      policy: 'launcher-managed',
+      channel: 'stable',
+      rolloutGroup: 'staff-ring',
+      canSkip: false,
+      lastCheckedAt: null,
+      updateAvailable: false,
+      history: [],
+      availableReleases: [],
+      rollbackSlots: [],
+      downloadProgress: null,
+      restartPrompt: false
+    },
+    launcherContract: {
+      packageName: '@qpjoy/electron-launcher',
+      available: true,
+      product: {
+        productId: 'mx-h2i',
+        displayName: 'MX-H2I',
+        mode: 'standalone'
+      },
+      foundation: {
+        runtimeName: 'Launcher Foundation',
+        socketNamespace: '~/.qpjoy/mx-launcher/sockets/{standaloneChannelProductId}.sock',
+        sharedCapabilities: ['auth', 'permission', 'release', 'network', 'observability'],
+        standaloneOwners: [
+          { productId: 'mx-h2i', displayName: 'MX-H2I', state: 'active', serviceVip: '10.88.100.1' },
+          { productId: 'luopan', displayName: 'Luopan', state: 'registered', serviceVip: '10.88.100.3' }
+        ]
+      }
+    },
+    launcherProductPresentation: {
+      productId: 'mx-h2i',
+      anonymousEnrollmentPolicy: 'enabled',
+      anonymousUiVisibility: 'advanced',
+      syncedAt: new Date().toISOString()
+    },
+    diagnosticLog: {
+      enabled: true,
+      fileName: 'mx-h2i-runtime.ndjson',
+      maxBytes: 2 * 1024 * 1024,
+      rotations: 2,
+      recent: [
+        { at: new Date().toISOString(), level: 'warning', event: 'network.diagnostics-problem', message: 'Mock Windows NRPT global policy is disabled.' }
+      ]
+    },
+    authFlow: null,
+    networkOperation: null,
+    feedback: null,
+    activity: [],
+    updatedAt: new Date().toISOString()
+  };
+
+  const commit = (patch) => {
+    mockState = {
+      ...mockState,
+      ...patch,
+      updatedAt: new Date().toISOString()
+    };
+    return clone(mockState);
+  };
+
+  return {
+    getState: async () => clone(mockState),
+    saveConfig: async (input) => commit({ config: { ...mockState.config, ...input }, feedback: { tone: 'success', message: '配置已保存。' } }),
+    connectGuest: async () => commit({
+      connection: {
+        ...mockState.connection,
+        state: 'connected',
+        mode: 'guest',
+        localIp: '10.89.120.24',
+        routePolicy: 'guest limited',
+        subject: 'anonymousPrincipal:h2i-demo',
+        health: {
+          wireGuard: 'ready',
+          domesticRelay: 'ready',
+          internalApi: 'ready',
+          splitDns: 'ready',
+          appBroker: 'ready'
+        }
+      },
+      feedback: null
+    }),
+    loginEmployee: async (input) => {
+      const now = new Date().toISOString();
+      const subscriptions = (mockState.apps.h2o.runtime?.subscriptions || []).map((item) => item.requiresUser
+        ? {
+          ...item,
+          url: h2oLooksLikeHttpSubscriptionUrl(item.url) ? item.url : mockH2oManagedSubscriptionUrl(),
+          status: 'ready',
+          syncStatus: 'synced',
+          nodes: Math.max(item.nodes || 0, 1),
+          lastUpdatedAt: now
+        }
+        : item);
+      const activeSubscription = subscriptions.find((item) => item.id === 'h2o-default') || mockState.apps.h2o.runtime.activeSubscription;
+      return commit({
+        connection: {
+          ...mockState.connection,
+          state: 'connected',
+          mode: 'employee',
+          localIp: '10.89.8.24',
+          routePolicy: 'user full',
+          subject: `user:${String(input.account || 'employee').split('@')[0]}`,
+          health: {
+            wireGuard: 'ready',
+            domesticRelay: 'ready',
+            internalApi: 'ready',
+            splitDns: 'ready',
+            appBroker: 'ready'
+          }
+        },
+        identity: {
+          kind: 'user',
+          provider: 'password',
+          displayName: String(input.account || 'employee').split('@')[0],
+          account: input.account || 'employee@qpjoy.local',
+          scopes: ['auth.read', 'appcenter.read', 'network.hdi.status']
+        },
+        apps: {
+          ...mockState.apps,
+          h2o: {
+            ...mockState.apps.h2o,
+            runtime: {
+              ...mockState.apps.h2o.runtime,
+              subscriptions,
+              activeSubscription,
+              activeSubscriptionId: activeSubscription.id,
+              status: mockState.apps.h2o.runtime?.running ? 'running' : 'ready',
+              lastAppliedAt: now
+            }
+          }
+        },
+        feedback: null
+      });
+    },
+    startFeishuLogin: async () => commit({
+      authFlow: {
+        provider: 'feishu',
+        stage: 'waiting-callback',
+        startedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        redirectUri: 'http://127.0.0.1:17891/oauth/feishu/callback'
+      },
+      feedback: {
+        tone: 'info',
+        message: mockState.connection.mode === 'guest' && mockState.connection.localIp
+          ? `已打开系统浏览器，请在飞书完成授权。当前访客连接（${mockState.connection.localIp}）保持不变。`
+          : '已打开系统浏览器，请在飞书完成授权。'
+      }
+    }),
+    cancelFeishuLogin: async () => commit({
+      authFlow: null,
+      feedback: {
+        tone: 'warning',
+        message: mockState.connection.mode === 'guest' && mockState.connection.localIp
+          ? `已取消飞书登录。当前访客连接（${mockState.connection.localIp}）保持不变。`
+          : '已取消飞书登录。'
+      }
+    }),
+    cancelNetworkOperation: async (operationId = null) => commit({
+      networkOperation: {
+        id: operationId || mockState.networkOperation?.id || `mock-network-operation-${Date.now()}`,
+        kind: mockState.networkOperation?.kind || 'background-recovery',
+        status: 'paused',
+        stage: 'paused',
+        cancelable: false,
+        promptActive: false,
+        startedAt: mockState.networkOperation?.startedAt || new Date().toISOString(),
+        message: '已停止后续恢复。'
+      },
+      feedback: {
+        tone: 'warning',
+        message: '已停止后续恢复；现有健康连接保持不变。'
+      }
+    }),
+    disconnect: async () => commit({
+      connection: {
+        ...mockState.connection,
+        state: 'idle',
+        localIp: null,
+        routePolicy: 'none',
+        subject: null,
+        health: {
+          wireGuard: 'idle',
+          domesticRelay: 'idle',
+          internalApi: 'idle',
+          splitDns: 'idle',
+          appBroker: 'idle'
+        }
+      },
+      authFlow: null,
+      feedback: { tone: 'info', message: '连接已断开。' }
+    }),
+    resetLocalNetworkIdentity: async () => commit({
+      connection: {
+        ...mockState.connection,
+        state: 'idle',
+        localIp: null,
+        routePolicy: 'none',
+        subject: null,
+        diagnostics: {
+          ...(mockState.connection?.diagnostics || {}),
+          localIdentityRepair: {
+            ok: true,
+            reason: 'mock-local-identity-reset',
+            updatedAt: new Date().toISOString()
+          }
+        },
+        health: {
+          wireGuard: 'idle',
+          domesticRelay: 'idle',
+          internalApi: 'idle',
+          splitDns: 'idle',
+          appBroker: 'idle'
+        }
+      },
+      authFlow: null,
+      feedback: { tone: 'success', message: '已清理旧连接并轮换本机网络身份。' }
+    }),
+    installAppCenter: async () => commit({
+      apps: {
+        ...mockState.apps,
+        appcenter: {
+          ...mockState.apps.appcenter,
+          installed: true,
+          enabled: true,
+          status: 'ready',
+          installedVersion: mockState.apps.appcenter.version,
+          latestVersion: mockState.apps.appcenter.latestVersion || mockState.apps.appcenter.version,
+          installPath: 'builtin://appcenter',
+          installedAt: new Date().toISOString(),
+          runtimeState: 'ready',
+          lastAction: new Date().toISOString(),
+          logs: [{ level: 'info', message: 'AppCenter builtin runtime is ready.', at: new Date().toISOString() }]
+        }
+      },
+      feedback: { tone: 'success', message: 'AppCenter 已安装，package/version 已写入本地缓存。' }
+    }),
+    enableH2o: async () => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          installed: true,
+          enabled: true,
+          status: 'enabled',
+          installedVersion: mockState.apps.h2o.version,
+          latestVersion: mockState.apps.h2o.latestVersion || mockState.apps.h2o.version,
+          installSource: 'workspace',
+          installPath: 'workspace:demos/mx-app-h2o',
+          installedAt: new Date().toISOString(),
+          runtimeState: 'ready',
+          lastAction: new Date().toISOString(),
+          logs: [{ level: 'info', message: 'Installed @qpjoy/electron-launcher-app-h2o from workspace.', at: new Date().toISOString() }]
+        }
+      },
+      feedback: { tone: 'success', message: 'H2O 已启用，broker-session 权限已就绪。' }
+    }),
+    launchH2o: async () => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          installed: true,
+          enabled: true,
+          status: 'running',
+          runtimeState: 'running',
+          installedVersion: mockState.apps.h2o.installedVersion || mockState.apps.h2o.version,
+          runtime: {
+            ...mockState.apps.h2o.runtime,
+            running: true,
+            status: 'running',
+            startedAt: mockState.apps.h2o.runtime?.startedAt || new Date().toISOString(),
+            lastAppliedAt: new Date().toISOString(),
+            metrics: {
+              ...(mockState.apps.h2o.runtime?.metrics || {}),
+              connections: 1,
+              lastProxyAppliedAt: new Date().toISOString()
+            }
+          },
+          lastAction: new Date().toISOString(),
+          logs: [{ level: 'info', message: 'H2O runtime started from AppCenter.', at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+        }
+      },
+      feedback: { tone: 'success', message: 'H2O 运行态已就绪，已在 AppCenter 内打开管理页。' }
+    }),
+    stopH2o: async () => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          status: 'enabled',
+          runtimeState: 'ready',
+          runtime: {
+            ...mockState.apps.h2o.runtime,
+            running: false,
+            status: 'stopped',
+            startedAt: null,
+            lastAppliedAt: new Date().toISOString()
+          },
+          lastAction: new Date().toISOString(),
+          logs: [{ level: 'info', message: 'H2O runtime stopped from AppCenter.', at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+        }
+      },
+      feedback: { tone: 'info', message: 'H2O 已停止，配置和订阅仍保留。' }
+    }),
+    selectH2oNode: async (name) => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          runtime: {
+            ...mockState.apps.h2o.runtime,
+            selectedNode: name,
+            lastAppliedAt: new Date().toISOString()
+          },
+          logs: [{ level: 'info', message: `H2O oversea node switched to ${name}.`, at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+        }
+      },
+      feedback: { tone: 'success', message: `已切换出海节点：${name}` }
+    }),
+    setH2oMode: async (mode) => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          runtime: {
+            ...mockState.apps.h2o.runtime,
+            mode,
+            lastAppliedAt: new Date().toISOString()
+          },
+          logs: [{ level: 'info', message: `H2O mode switched to ${mode}.`, at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+        }
+      },
+      feedback: { tone: 'success', message: 'H2O 模式已切换。' }
+    }),
+    updateH2oRuntime: async (patch) => {
+      const runtime = h2oRuntime({ runtime: { ...mockState.apps.h2o.runtime, ...(patch || {}) } });
+      const logMessage = patch?.logMessage || 'H2O runtime updated from AppCenter.';
+      return commit({
+        apps: {
+          ...mockState.apps,
+          h2o: {
+            ...mockState.apps.h2o,
+            enabled: true,
+            status: runtime.running ? 'running' : 'enabled',
+            runtimeState: runtime.running ? 'running' : 'ready',
+            runtime,
+            lastAction: new Date().toISOString(),
+            logs: [{ level: patch?.logLevel || 'info', message: logMessage, at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+          }
+        },
+        feedback: { tone: 'success', message: 'H2O 运行配置已更新。' }
+      });
+    },
+    refreshH2oSubscription: async () => {
+      const now = new Date().toISOString();
+      const runtime = h2oRuntime(mockState.apps.h2o);
+      const mockUserReady = mockState.identity?.kind === 'user' || mockState.connection?.mode === 'employee';
+      const subscriptions = runtime.subscriptions.map((item) => item.requiresUser
+        ? {
+          ...item,
+          url: mockUserReady && !h2oLooksLikeHttpSubscriptionUrl(item.url) ? mockH2oManagedSubscriptionUrl() : item.url,
+          status: mockUserReady ? 'ready' : 'login-required',
+          syncStatus: mockUserReady ? 'synced' : 'login-required',
+          errorMessage: null,
+          nodes: mockUserReady ? Math.max(item.nodes || 0, 1) : item.nodes,
+          lastUpdatedAt: now
+        }
+        : item);
+      const activeSubscription = subscriptions.find((item) => item.id === runtime.activeSubscription.id) || subscriptions[0] || runtime.activeSubscription;
+      return commit({
+        apps: {
+          ...mockState.apps,
+          h2o: {
+            ...mockState.apps.h2o,
+            runtime: {
+              ...runtime,
+              subscriptions,
+              activeSubscription,
+              activeSubscriptionId: activeSubscription.id,
+              status: runtime.running ? 'running' : h2oSubscriptionUsable(activeSubscription) ? 'ready' : 'subscription-required',
+              lastAppliedAt: now
+            },
+            logs: [{ level: 'info', message: 'H2O mock subscription refreshed from user-center.', at: now }, ...(mockState.apps.h2o.logs || [])]
+          }
+        },
+        feedback: {
+          tone: h2oSubscriptionUsable(activeSubscription) ? 'success' : 'warning',
+          message: h2oSubscriptionUsable(activeSubscription) ? 'H2O 已获得当前用户的默认 oversea 订阅。' : '请先登录员工用户。'
+        }
+      });
+    },
+    provisionH2oOversea: async () => {
+      const now = new Date().toISOString();
+      const runtime = h2oRuntime(mockState.apps.h2o);
+      const mockUserReady = mockState.identity?.kind === 'user' || mockState.connection?.mode === 'employee';
+      const subscriptions = runtime.subscriptions.map((item) => item.requiresUser
+        ? {
+          ...item,
+          url: mockUserReady && !h2oLooksLikeHttpSubscriptionUrl(item.url) ? mockH2oManagedSubscriptionUrl() : item.url,
+          status: mockUserReady ? 'ready' : 'login-required',
+          syncStatus: mockUserReady ? 'synced' : 'login-required',
+          errorMessage: mockUserReady ? null : '系统 oversea 订阅需要先登录员工用户。',
+          nodes: mockUserReady ? Math.max(item.nodes || 0, 1) : item.nodes,
+          lastUpdatedAt: now
+        }
+        : item);
+      const activeSubscription = subscriptions.find((item) => item.id === runtime.activeSubscription.id) || subscriptions[0] || runtime.activeSubscription;
+      return commit({
+        apps: {
+          ...mockState.apps,
+          h2o: {
+            ...mockState.apps.h2o,
+            runtime: {
+              ...runtime,
+              subscriptions,
+              activeSubscription,
+              activeSubscriptionId: activeSubscription.id,
+              status: runtime.running ? 'running' : h2oSubscriptionUsable(activeSubscription) ? 'ready' : 'subscription-required',
+              lastAppliedAt: now
+            },
+            logs: [{ level: 'info', message: 'H2O mock oversea entitlement provisioned.', at: now }, ...(mockState.apps.h2o.logs || [])]
+          }
+        },
+        feedback: {
+          tone: h2oSubscriptionUsable(activeSubscription) ? 'success' : 'warning',
+          message: h2oSubscriptionUsable(activeSubscription) ? '已为当前用户分配 H2O oversea 订阅。' : '请先登录员工用户。'
+        }
+      });
+    },
+    openH2oTestWindow: async (input) => {
+      const now = new Date().toISOString();
+      const runtime = h2oRuntime(mockState.apps.h2o);
+      const url = String(input?.url || 'https://www.google.com');
+      return commit({
+        apps: {
+          ...mockState.apps,
+          h2o: {
+            ...mockState.apps.h2o,
+            runtime: {
+              ...runtime,
+              metrics: {
+                ...runtime.metrics,
+                connections: runtime.running ? runtime.metrics.connections + 1 : runtime.metrics.connections,
+                lastProxyAppliedAt: now
+              },
+              lastAppliedAt: now
+            },
+            logs: [{ level: 'info', message: `H2O mock test window opened: ${url}.`, at: now }, ...(mockState.apps.h2o.logs || [])]
+          }
+        },
+        feedback: { tone: 'success', message: `H2O 测试窗口已打开：${url}` }
+      });
+    },
+    checkUpdates: async () => commit({
+      update: {
+        ...mockState.update,
+        status: 'update-available',
+        latestVersion: '0.1.1',
+        updateAvailable: true,
+        planId: 'mock_release_plan',
+        releaseId: 'mock_release_0_1_1',
+        componentId: 'mx-h2i',
+        componentKind: 'mx-h2i-installer',
+        artifactKind: 'dmg',
+        artifactId: 'mock_mx_h2i_0_1_1_dmg',
+        artifactUrl: 'https://example.invalid/mx-h2i-0.1.1.dmg',
+        artifactDigest: 'sha256:mock',
+        artifactPlatform: 'darwin',
+        activation: 'installer-manual',
+        restartRequired: true,
+        majorUpdateRequiresInstaller: true,
+        canSkip: true,
+        lastCheckedAt: new Date().toISOString(),
+        reason: 'mock Release Center 发现安装包更新。',
+        availableReleases: [
+          {
+            id: 'mock_release_plan',
+            releaseId: 'mock_release_0_1_1',
+            planId: 'mock_release_plan',
+            version: '0.1.1',
+            channel: 'stable',
+            status: 'ready',
+            componentKind: 'mx-h2i-installer',
+            artifactKind: 'dmg',
+            activation: 'installer-manual',
+            sizeBytes: 189695362,
+            artifactId: 'mock_mx_h2i_0_1_1_dmg',
+            artifactUrl: 'https://example.invalid/mx-h2i-0.1.1.dmg',
+            artifactDigest: 'sha256:mock',
+            restartRequired: true,
+            platform: 'darwin',
+            arch: 'universal',
+            fileName: 'MX-H2I-0.1.1-mac-universal.dmg',
+            createdAt: new Date().toISOString(),
+            gate: 'passed'
+          }
+        ],
+        history: [
+          { id: 'mock_check', kind: 'check', status: 'update-available', version: '0.1.1', fromVersion: '0.1.0', componentKind: 'mx-h2i-installer', updateMode: 'mandatory', message: '发现安装包更新。', at: new Date().toISOString() },
+          ...(mockState.update.history || [])
+        ].slice(0, 12)
+      },
+      feedback: { tone: 'success', message: '发现 MX-H2I 大版本 0.1.1，当前 0.1.0，通道 stable。' }
+    }),
+    applyUpdate: async () => commit({
+      update: {
+        ...mockState.update,
+        status: 'installer-opened',
+        stagedPath: '/tmp/mx-h2i-0.1.1.dmg',
+        downloadedAt: new Date().toISOString(),
+        downloadedBytes: 189695362,
+        downloadedDigest: mockState.update.artifactDigest || 'sha256:mock',
+        downloadProgress: { state: 'downloaded', bytes: 189695362, totalBytes: 189695362, percent: 100, updatedAt: new Date().toISOString() },
+        restartPrompt: true,
+        rollbackSlots: [
+          { id: 'mock_mx_h2i_0_1_1_dmg', version: '0.1.1', releaseId: 'mock_release_0_1_1', artifactId: 'mock_mx_h2i_0_1_1_dmg', artifactKind: 'dmg', path: '/tmp/mx-h2i-0.1.1.dmg', digest: 'sha256:mock', sizeBytes: 189695362, platform: 'darwin', downloadedAt: new Date().toISOString() },
+          ...(mockState.update.rollbackSlots || [])
+        ].slice(0, 3),
+        history: [
+          { id: 'mock_download', kind: 'major-download', status: 'downloaded', version: '0.1.1', fromVersion: '0.1.0', componentKind: 'mx-h2i-installer', updateMode: 'mandatory', message: '大版本安装包已下载并校验。', at: new Date().toISOString() },
+          ...(mockState.update.history || [])
+        ].slice(0, 12)
+      },
+      feedback: { tone: 'success', message: '安装包已校验并打开。安装完成后可以立即重启 MX-H2I，也可以稍后手动重启。' }
+    }),
+    installRelease: async () => commit({ feedback: { tone: 'info', message: '正在下载指定的大版本安装包。' } }),
+    showDownloadedInstaller: async () => commit({ feedback: { tone: 'info', message: '已在文件夹中显示安装包。' } }),
+    restartApp: async () => commit({ feedback: { tone: 'info', message: '正在重启 MX-H2I。' } }),
+    openRollbackInstaller: async () => commit({ feedback: { tone: 'success', message: '已打开历史版本安装包。' } }),
+    refreshDiagnostics: async () => commit({
+      connection: {
+        ...mockState.connection,
+        domesticPeerSync: {
+          status: 'passed',
+          execution: 'executed',
+          checkedAt: new Date().toISOString(),
+          failures: []
+        }
+      },
+      feedback: { tone: 'success', message: '诊断已刷新。' }
+    }),
+    repairNetworkOwnership: async () => commit({
+      feedback: { tone: 'success', message: '已备份并清理残留网络声明，登录信息已保留；请使用原员工身份连接。' }
+    }),
+    repairSystemNetwork: async () => commit({
+      connection: {
+        ...mockState.connection,
+        diagnostics: {
+          ...(mockState.connection.diagnostics || {}),
+          networkEnvironment: {
+            reason: 'mock-repair',
+            phase: mockState.connection.state === 'connected' ? 'connected' : 'disconnected',
+            host: mockState.connection.state === 'connected'
+              ? 'h2i.mxinfo-inc.cn'
+              : 'h2i.minsight-ai.com',
+            resolution: {
+              state: mockState.connection.state === 'connected' ? 'expected-internal' : 'public',
+              severity: 'ok',
+              message: 'mock network repaired',
+              addresses: [{ address: mockState.connection.state === 'connected' ? '10.88.88.88' : '116.62.51.154', classification: mockState.connection.state === 'connected' ? 'expected-internal-target' : 'public' }]
+            },
+            systemDomainProxy: { applied: mockState.connection.state === 'connected', systemResolverMode: 'dynamic' }
+          }
+        }
+      },
+      feedback: { tone: 'success', message: '系统网络状态已修复。' }
+    }),
+    openDiagnosticLogs: async () => commit({ feedback: { tone: 'info', message: '已打开 MX-H2I 日志目录。' } }),
+    exportDiagnostics: async () => commit({ feedback: { tone: 'success', message: '诊断包已导出：MX-H2I-diagnostics-mock。' } }),
+    openAdmin: async () => true,
+    setWindowMode: async () => true,
+    startWindowDrag: async () => true,
+    moveWindowBy: async () => true,
+    finishWindowDrag: async () => true,
+    hideTopDockIfPending: async () => true,
+    windowControl: async () => true,
+    onState: () => () => {}
+  };
+}

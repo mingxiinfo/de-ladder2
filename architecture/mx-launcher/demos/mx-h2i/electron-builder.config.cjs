@@ -1,0 +1,124 @@
+const { rm } = require('node:fs/promises');
+const { createRequire } = require('node:module');
+const path = require('node:path');
+
+const shouldNotarize = Boolean(
+  process.env.MX_H2I_NOTARIZE === '1' ||
+  process.env.APPLE_ID ||
+  process.env.APPLE_API_KEY ||
+  process.env.APPLE_API_KEY_ID
+);
+
+async function invalidateBetterSqlite3RebuildMarker() {
+  const tunnelPackagePath = require.resolve('@qpjoy/electron-plugin-tunnel/package.json');
+  const tunnelRequire = createRequire(tunnelPackagePath);
+  const betterSqlitePackagePath = tunnelRequire.resolve('better-sqlite3/package.json');
+
+  // electron-rebuild 4.2.0 omits the target platform from this marker, so a
+  // win32-x64 build can otherwise be reused incorrectly by a darwin-x64 build.
+  await rm(
+    path.join(path.dirname(betterSqlitePackagePath), 'build', 'Release', '.forge-meta'),
+    { force: true }
+  );
+  return true;
+}
+
+module.exports = {
+  appId: 'dev.qpjoy.mx-h2i',
+  productName: 'MinCave',
+  // package.json.productName and the executable/app ID stay compatible with
+  // installed MX-H2I clients (userData, safeStorage, upgrades and ownership).
+  artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
+  beforeBuild: invalidateBetterSqlite3RebuildMarker,
+  beforePack: async (context) => {
+    if (context.electronPlatformName === 'win32') {
+      const { buildWindowsNetworkService } = await import('./scripts/build-windows-network-service.mjs');
+      await buildWindowsNetworkService(context.arch === 1 ? 'x64' : String(context.arch));
+    }
+  },
+  asar: true,
+  directories: {
+    output: 'out/electron-builder'
+  },
+  files: [
+    'package.json',
+    'src/**/*',
+    '!**/node_modules/better-sqlite3/build/Release/test_extension.node'
+  ],
+  extraResources: [
+    {
+      from: 'scripts/repair-macos-dns.sh',
+      to: 'repair/repair-macos-dns.sh'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/darwin-arm64/resources/wireguard/darwin-arm64',
+      to: 'wireguard/darwin-arm64'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/darwin-x64/resources/wireguard/darwin-x64',
+      to: 'wireguard/darwin-x64'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/linux-arm64/resources/wireguard/linux-arm64',
+      to: 'wireguard/linux-arm64'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/linux-x64/resources/wireguard/linux-x64',
+      to: 'wireguard/linux-x64'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/win32-x64/resources/wireguard/win32-x64',
+      to: 'wireguard/win32-x64'
+    }
+  ],
+  toolsets: {
+    // The legacy winCodeSign archive contains macOS symlinks and requires
+    // elevated Windows privileges just to unpack. The Windows Kits bundle
+    // avoids that host-specific extraction failure.
+    winCodeSign: '1.0.0'
+  },
+  publish: null,
+  mac: {
+    target: ['zip', 'dmg'],
+    icon: 'build/icon.icns',
+    category: 'public.app-category.business',
+    hardenedRuntime: true,
+    gatekeeperAssess: false,
+    x64ArchFiles: '**/wireguard/darwin-{arm64,x64}/**/*',
+    entitlements: 'build/entitlements.mac.plist',
+    entitlementsInherit: 'build/entitlements.mac.plist',
+    ...(shouldNotarize ? { notarize: true } : {})
+  },
+  dmg: {
+    sign: true
+  },
+  win: {
+    extraResources: [{ from: 'out/windows-network-service', to: 'network-service', filter: ['*.exe', 'worker.cjs', 'THIRD_PARTY_NOTICES.txt'] }],
+    icon: 'build/icon.ico',
+    target: [
+      {
+        target: 'zip',
+        arch: ['x64']
+      },
+      {
+        target: 'nsis',
+        arch: ['x64']
+      }
+    ],
+    executableName: 'mx-h2i',
+    signAndEditExecutable: true,
+    requestedExecutionLevel: 'asInvoker'
+  },
+  nsis: {
+    shortcutName: 'MinCave',
+    oneClick: false,
+    perMachine: true,
+    allowElevation: true,
+    allowToChangeInstallationDirectory: true,
+    include: 'build/installer.nsh'
+  },
+  linux: {
+    icon: 'build/icons',
+    target: ['dir']
+  }
+};

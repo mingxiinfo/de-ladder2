@@ -73,8 +73,69 @@ export class MinCaveService {
     }
     return { user, proof };
   }
+  // L2 (de-ladder2 docs/49): with MX_MINCAVE_PASSWORD_LOGIN_ENABLED, a token from the
+  // Launcher's own account/password grant enters MinCave as an employee. It is never a
+  // member record (those are keyed by Feishu subject), never admin, and the user-center
+  // checks the Feishu path uses (active, not denied mx-h2i, not signed out) still apply.
+  // Returns null for anything that is not a password token so the Feishu path runs as before.
+  private async passwordIdentity(authorization?: string) {
+    if (!this.config.mincavePasswordLoginEnabled) return null;
+    if (!authorization || !/^Bearer [^\s]{1,4096}$/.test(authorization)) return null;
+    const auth = await this.store.introspectToken({
+      token: authorization.slice(7),
+      audience: 'mx-sdk',
+    });
+    if (auth.authProvider !== 'local-password') return null;
+    if (
+      !auth.active ||
+      auth.tokenKind !== 'jwt' ||
+      auth.appId !== 'mx-h2i' ||
+      !auth.scopes.includes('auth.read') ||
+      auth.principal?.kind !== 'user' ||
+      !auth.principal.userId ||
+      !auth.issuedAt ||
+      !Number.isFinite(Date.parse(auth.issuedAt))
+    ) {
+      throw new UnauthorizedException({
+        code: 'mincave_login_required',
+        message: '请重新登录。',
+      });
+    }
+    const user = await this.store.getUserCenterUser(auth.principal.userId);
+    if (
+      !user ||
+      user.status !== 'active' ||
+      user.appAccess.deniedAppIds.includes('mx-h2i') ||
+      !passwordSessionActive(user, Date.parse(auth.issuedAt) / 1000)
+    ) {
+      throw new ForbiddenException({
+        code: 'mincave_access_denied',
+        message: '当前账号无 MinCave 使用权限。',
+      });
+    }
+    return user;
+  }
+  private passwordWorkspaceKey() {
+    const key = this.config.mincaveFeishuTenantKey;
+    return key && /^[A-Za-z0-9_-]{1,160}$/.test(key) ? key : 'local-password';
+  }
   async session(authorization?: string, body?: unknown) {
     const device = mincaveSessionDevice(body);
+    const passwordUser = await this.passwordIdentity(authorization);
+    if (passwordUser) {
+      if (device) await this.store.recordMinCaveDevice(passwordUser.userId, device);
+      return {
+        allowed: true,
+        role: 'employee' as const,
+        canManage: false,
+        companyName: '明悉科技',
+        userId: passwordUser.userId,
+        applications: mincaveApplications(
+          await this.store.getMinCaveWorkspace(this.passwordWorkspaceKey()),
+          passwordUser.profile.department || '',
+        ),
+      };
+    }
     const { user, proof } = await this.identity(authorization);
     const result = await this.store.admitMinCaveMember({
       userId: user.userId,
@@ -93,6 +154,11 @@ export class MinCaveService {
     };
   }
   async devices(authorization?: string) {
+    const passwordUser = await this.passwordIdentity(authorization);
+    if (passwordUser) {
+      const devices = await this.store.listMinCaveDevices(passwordUser.userId);
+      return { userId: passwordUser.userId, devices: devices.map(({ userId: _owner, ...device }) => device) };
+    }
     const { user, proof } = await this.identity(authorization);
     const member = (await this.store.listMinCaveMembers()).find(row =>
       row.userId === user.userId && row.tenantKey === proof.tenantKey);

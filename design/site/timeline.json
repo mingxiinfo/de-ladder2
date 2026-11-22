@@ -264,6 +264,12 @@
       "date": "2026-11-22",
       "docs": "48",
       "decisions": "10.88.88.88（Internal）和 10.88.0.1（Domestic）是 Launcher 的角色地址，跟着角色走：s2 那套也用 .88，用自己的新密钥，切换时换生产 Domestic 上这个对端的公钥；边缘隧道的 launcher 方案把 .88 保留，s1 以后的边缘地址是 .87，s2 仍是 .89"
+    },
+    {
+      "round": "第二十一轮",
+      "date": "2026-11-22",
+      "docs": "49",
+      "decisions": "MinCave 登录页连点 5 下 logo 出现账号密码登录（旧界面的能力），客户端和服务端各一个开关、默认关；账号密码登录只是员工，不是 MinCave 管理员；客户端源码迁进 architecture/mx-launcher/demos/mx-h2i，界面能构建能测，还打不了安装包"
     }
   ]
 }

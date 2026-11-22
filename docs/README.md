@@ -54,6 +54,7 @@
 | 46 | [项目一个个迁进本工程，Launcher 的第一步](46.project-layout-and-launcher-first-slice.md) | 和 k8s 高度集成的平台放 `architecture/`，业务项目连源码放 `projects/`，`ladder1/` 不再改；Launcher 从 L1 `1d9555e8` 拷进 `architecture/mx-launcher/`：镜像、`pg-launcher`、API、Caddy（不占宿主机端口，只信任网关带来的客户端地址）、`image` / `secret` / `app status` 命令；本机测过，没在集群上部署过 |
 | 47 | [服务放哪台、去掉 Caddy、部署快路径、host-runner 和 DNS](47.scheduling-nginx-gateway-deploy-fast-path-host-runner-dns.md) | 调度器按 requests 放 Pod，人只定 GPU、service peer、数据库、分散副本，`k8s capacity` 看依据；Launcher API 不再经过应用网关，应用网关换成 nginx；`app deploy` 分检查、一次性步骤（台账、归档）、apply、滚动、验证；host-runner 和分流 DNS 在界面上操作；Launcher 把 `10.88.88.88` 写死成 Internal 的角色地址，待定 |
 | 48 | [Launcher 的角色地址](48.launcher-role-addresses.md) | `10.88.88.88`（Internal）和 `10.88.0.1`（Domestic）跟着角色走：s2 那套也用 `.88`，切换时换生产 Domestic 上这个对端的公钥；边缘隧道把 `.88` 保留，s1 的边缘地址是 `.87`，s2 仍是 `.89` |
+| 49 | [MinCave 的隐藏账号密码登录](49.mincave-hidden-password-login.md) | 登录页连点 5 下 logo 出现账号密码登录；客户端 `MX_H2I_MINCAVE_PASSWORD_LOGIN`、服务端 `MX_MINCAVE_PASSWORD_LOGIN_ENABLED` 两个开关，默认关；账号密码登录只是员工；客户端源码迁进 `architecture/mx-launcher/demos/mx-h2i/`，还打不了安装包 |
 
 **接着做：先读 29，再读 30、33、34。要在 s2 上动手，读 35。Launcher 和 L1 自己的服务怎么上 s2，读 36；动手做 Launcher v2 和 MX-H2I v2 之前，读 45；项目放哪、Launcher 怎么部署到 s2，读 46、47、48。加 Domestic、往边缘推送部署，读 37，再读 38、39、40、41、42、43、44。** 31、32 讲的是查看文档用的站点，不是架构。33、34 是海外的 toC 站点，大部分和 s2 无关，可以并行；NAS 读写那一段要等 s2。 第一次读：01 → 16 → 21 → 27 → 03 → 17 → 11。要动手：14 → 19 → 22 → 12。
 

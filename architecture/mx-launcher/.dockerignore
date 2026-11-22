@@ -4,6 +4,8 @@
 **/.env.*
 !**/.env.example
 deploy/
+# MX-H2I / MinCave 客户端（docs/49），不进服务端镜像
+demos/
 README.md
 SOURCE.md
 **/*.log

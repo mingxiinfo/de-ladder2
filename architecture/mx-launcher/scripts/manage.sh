@@ -19,6 +19,8 @@ mx-launcher（architecture/mx-launcher）
   render [环境]       渲染清单       = ./scripts/manage.sh app render mx-launcher [环境]
   bootstrap-render    重新生成 deploy/k8s/bootstrap/ 的两个 ConfigMap（用 Launcher 自己的生成函数，docs/47）
   status              看集群里的状态 = ./scripts/manage.sh app status mx-launcher（要 --context）
+  client-test         MinCave 客户端（demos/mx-h2i）：构建界面、跑界面测试和 L2 加的测试（要先 npm --prefix demos/mx-h2i/ui ci）
+  client-package      还没实现：打安装包要 L1 的 workspace 包和 WireGuard 引擎，还没迁进来（docs/49）
 
 部署、导入镜像、建 Secret 都用本工程的 ./scripts/manage.sh，必须带 --context（docs/46）。
 EOF
@@ -34,6 +36,13 @@ case "$cmd" in
   render) exec "$L2" app render mx-launcher "$@" ;;
   bootstrap-render) cd "$HERE/server" && exec node --import tsx "$HERE/scripts/render-bootstrap.mts" ;;
   status) exec "$L2" app status mx-launcher "$@" ;;
+  client-test)
+    cd "$HERE/demos/mx-h2i"
+    node scripts/build-ui.mjs
+    exec node --test ui/tests/*.test.mjs scripts/mincave-password-login.test.mjs scripts/ui-entry-policy.test.mjs scripts/network-diagnostic-policy.test.mjs ;;
+  client-package)
+    echo "client-package 还没实现：打 MinCave 安装包要 L1 的 workspace 包（electron-launcher、tunnel 引擎、WireGuard 引擎），还没迁进来。见 docs/49。" >&2
+    exit 2 ;;
   help|-h|--help) usage ;;
   *) echo "未知命令：$cmd" >&2; usage >&2; exit 1 ;;
 esac

@@ -1,0 +1,51 @@
+{
+  "name": "@qpjoy/mx-h2i-demo",
+  "productName": "MX-H2I",
+  "version": "2.1.20",
+  "private": true,
+  "author": "QPJoy",
+  "description": "MX-H2I Electron standalone launcher demo.",
+  "main": "src/main.cjs",
+  "scripts": {
+    "setup": "node scripts/dev-mode.mjs local",
+    "setup:npm": "node scripts/dev-mode.mjs npm",
+    "dev": "node scripts/build-ui.mjs && node scripts/run-clean-env.mjs node scripts/dev-mode.mjs local && node scripts/run-clean-env.mjs node scripts/ensure-workspace-build.mjs && node scripts/run-clean-env.mjs electron-builder install-app-deps && node scripts/run-clean-env.mjs node scripts/run-electron-dev.mjs",
+    "start": "pnpm dev",
+    "build": "pnpm run package",
+    "check": "node scripts/build-ui.mjs && node --test ui/tests/*.test.mjs && node --check scripts/dev-mode.mjs && node --check scripts/ensure-workspace-build.mjs && node --check scripts/node-env.mjs && node scripts/node-env.test.mjs && node scripts/bootstrap-domain-safety.test.mjs && node scripts/split-dns-policy.test.mjs && pnpm --dir ../../packages/electron-launcher test:system-domain-proxy-darwin && node scripts/plugin-package-source.test.mjs && node scripts/update-state-policy.test.mjs && node scripts/clash-link-policy.test.mjs && node scripts/h2o-platform-default-assignment.test.mjs && node --check src/clash-link-policy.cjs && node scripts/renderer-scroll-safety.test.mjs && node scripts/window-drag-size-safety.test.mjs && node scripts/anonymous-entry-safety.test.mjs && node scripts/release-notes-markdown.test.mjs && node --test scripts/release-withdrawal.test.mjs && node --test scripts/mincave-password-login.test.mjs && node scripts/windows-reconnect-safety.test.mjs && node scripts/windows-ownership-recovery.test.mjs && node --test scripts/ui-entry-policy.test.mjs scripts/network-diagnostic-policy.test.mjs && node scripts/feishu-login-safety.test.mjs && node scripts/asar-update-bootstrap.test.mjs && node --check scripts/build-asar-update.mjs && node --check scripts/run-clean-env.mjs && node --check scripts/run-electron-dev.mjs && node --check src/main.cjs && node --check src/main-runtime.cjs && node --check src/preload.cjs && node --check src/release-notes-markdown.js && node --check src/renderer.js && node --check electron-builder.config.cjs",
+    "check:windows-network": "pnpm --dir ../../packages/electron-launcher smoke:system-domain-proxy-windows && pnpm --dir ../../../../electron-plugin/packages/electron-core-wireguard smoke:windows-nrpt && node scripts/windows-ownership-probe-smoke.mjs && pnpm run check:windows-service",
+    "package": "node scripts/dev-mode.mjs ensure && node scripts/run-clean-env.mjs node scripts/ensure-workspace-build.mjs && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --dir",
+    "make": "node scripts/dev-mode.mjs ensure && node scripts/run-clean-env.mjs node scripts/ensure-workspace-build.mjs && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs",
+    "make:asar": "node scripts/dev-mode.mjs ensure && node scripts/run-clean-env.mjs node scripts/ensure-workspace-build.mjs && pnpm run check && node scripts/build-asar-update.mjs",
+    "make:asar:mac": "bash scripts/build-asar-macos.sh",
+    "make:asar:win": "scripts\\build-asar-windows.cmd",
+    "make:mac:dmg": "node scripts/dev-mode.mjs ensure && node scripts/run-clean-env.mjs node scripts/ensure-workspace-build.mjs && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --mac dmg --universal",
+    "make:win": "node scripts/dev-mode.mjs ensure && node scripts/run-clean-env.mjs node scripts/ensure-workspace-build.mjs && pnpm run check && pnpm run check:windows-network && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --win --x64",
+    "build:workspace-deps": "node scripts/ensure-workspace-build.mjs",
+    "ui:install": "npm --prefix ui ci",
+    "build:ui": "node scripts/build-ui.mjs",
+    "check:ui": "node scripts/build-ui.mjs && node --test ui/tests/*.test.mjs",
+    "test:ui:browser": "npm --prefix ui run test:browser",
+    "check:windows-service": "node --test scripts/windows-network-service.test.mjs && node --check native/windows-network-worker.cjs && node --check src/windows-network-service.cjs",
+    "build:windows-service": "node scripts/build-windows-network-service.mjs"
+  },
+  "dependencies": {
+    "@qpjoy/electron-core-mihomo": "workspace:^",
+    "@qpjoy/electron-launcher": "workspace:*",
+    "@qpjoy/electron-plugin-tunnel": "workspace:^"
+  },
+  "optionalDependencies": {
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-x64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-arm64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-x64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-win32-x64": "workspace:^"
+  },
+  "devDependencies": {
+    "@electron/asar": "3.4.1",
+    "dmg-builder": "26.15.3",
+    "electron": "34.5.8",
+    "electron-builder": "26.15.3",
+    "electron-builder-squirrel-windows": "26.15.3"
+  }
+}

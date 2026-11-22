@@ -35,6 +35,8 @@ export interface RuntimeConfig {
   launcherNetworkRuntimeSnapshotRetentionSamples: number;
   mincaveFeishuTenantKey?: string | null;
   mincaveInitialAdminUserId?: string | null;
+  /** L2: admit Launcher account/password tokens to MinCave as employees. */
+  mincavePasswordLoginEnabled?: boolean;
   feishuAppId: string | null;
   feishuAppSecret: string | null;
   feishuAllowedTenantKeys: string[];

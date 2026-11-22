@@ -130,6 +130,9 @@ export function loadConfig(): RuntimeConfig {
     ),
     mincaveFeishuTenantKey: process.env.MX_MINCAVE_FEISHU_TENANT_KEY?.trim() || null,
     mincaveInitialAdminUserId: process.env.MX_MINCAVE_INITIAL_ADMIN_USER_ID?.trim() || null,
+    // L2 (de-ladder2 docs/49): Launcher account/password logins may enter MinCave as an
+    // employee (never admin). Off keeps the L1 rule: MinCave is Feishu only.
+    mincavePasswordLoginEnabled: boolFromEnv('MX_MINCAVE_PASSWORD_LOGIN_ENABLED', false),
     feishuAppId: process.env.MX_FEISHU_APP_ID?.trim() || null,
     feishuAppSecret: process.env.MX_FEISHU_APP_SECRET?.trim() || null,
     feishuAllowedTenantKeys: stringListFromEnv('MX_FEISHU_ALLOWED_TENANT_KEYS'),
