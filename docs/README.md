@@ -65,6 +65,7 @@
 | 57 | [从 internal02 往 domestic02 推：命令行和管理界面各管一块](57.push-to-domestic02-cli-and-admin-ui.md) | 命令行（边缘工具、`relay`）管隧道、80、docker、镜像、Launcher 公钥；管理界面（Domestic plan）管中继、边缘、DNS 和 443 的 public-tls，证书自动签；`mincave.minsight-ai.com`；白名单接受 bootstrap 写的 ssh_config |
 | 58 | [Domestic Runtime Config：站点能输入，改了不丢](58.domestic-runtime-config-editable.md) | s2 没拷线上配置，截图里是代码默认值；Domestic Site 改成能输入新站点；按站点记未保存的修改；新站点默认值由 `MX_DOMESTIC_DEFAULT_SITE_ID` / `MX_DOMESTIC_DEFAULT_BOOTSTRAP_HOST` 设，s2 是 domestic02 / mincave.minsight-ai.com |
 | 59 | [用 mincave.minsight-ai.com 进后台、做 bootstrap；MinCave 两端的包](59.mincave-domain-admin-and-client-packages.md) | domestic02 的 nginx 管 443：客户端接口所有人可用，管理后台只给登记的来源；证书在 s2 上签、续、推（`relay domestic02 site / cert`）；打包要在 L1 导出上叠 L2 源码，mac 在 Mac 上、win 在 Windows 上打，测试包和正式版同一身份是最大的坑 |
+| 60 | [mincave.minsight-ai.com 默认全部放行](60.bootstrap-domain-open-by-default.md) | Launcher 所有路由经 domestic02 对公网开，鉴权交给 Launcher；`--access restricted` 一条命令切回 v1 的白名单；不少 `/internal/*` 写接口自己没鉴权，切换前必须补（第 78 项） |
 
 **接着做：先读 29，再读 30、33、34。要在 s2 上动手，读 35。Launcher 和 L1 自己的服务怎么上 s2，读 36；动手做 Launcher v2 和 MX-H2I v2 之前，读 45；项目放哪、Launcher 怎么部署到 s2，读 46、47、48。加 Domestic、往边缘推送部署，读 37，再读 38、39、40、41、42、43、44。** 31、32 讲的是查看文档用的站点，不是架构。33、34 是海外的 toC 站点，大部分和 s2 无关，可以并行；NAS 读写那一段要等 s2。 第一次读：01 → 16 → 21 → 27 → 03 → 17 → 11。要动手：14 → 19 → 22 → 12。
 

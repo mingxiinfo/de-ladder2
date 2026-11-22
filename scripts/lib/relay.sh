@@ -119,8 +119,14 @@ relay_site_render() { # 写 nginx/ladder2-bootstrap.conf；证书在 state 里�
   [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || die "inventory 里 $RELAY_HOST 的 bootstrap_domain 不是域名：${domain:-空}"
   link="$(host_field s2 wg_ip)"; site_is_ipv4 "$link" || die "inventory 里 s2 的 wg_ip（边缘隧道地址）不是地址：$link"
   allow_file="$state/ladder2-admin-allow"
-  if [[ -f "$allow_file" ]]; then
-    while IFS= read -r cidr; do [[ -n "$cidr" ]] && allow_lines+="    $cidr 1;"$'\n'; done <"$allow_file"
+  local mode; mode="$(cat "$state/ladder2-access" 2>/dev/null || echo open)"
+  if [[ "$mode" == restricted ]]; then
+    allow_lines="    default 0;"$'\n'
+    if [[ -f "$allow_file" ]]; then
+      while IFS= read -r cidr; do [[ -n "$cidr" ]] && allow_lines+="    $cidr 1;"$'\n'; done <"$allow_file"
+    fi
+  else
+    allow_lines="    default 1;"$'\n'
   fi
   [[ -f "$state/certs/$domain.crt" && -f "$state/certs/$domain.key" ]] && tls=1
   install -d -m 700 "$state/nginx"
@@ -136,8 +142,12 @@ relay_site_render() { # 写 nginx/ladder2-bootstrap.conf；证书在 state 里�
   RELAY_DOMAIN="$domain"; RELAY_LINK="$link"
   if (( tls )); then ok "站点 $domain：443（证书在 state 里）+ 80 跳转"
   else warn "站点 $domain：证书还没签，只有 80（签证书用）。下一步：relay $RELAY_HOST cert --agree-tos"; fi
-  if [[ -n "$allow_lines" ]]; then ok "管理后台只给：$(tr '\n' ' ' <"$allow_file")"
-  else note "管理后台在公网上关着（没有 --admin-allow）。要从公网进后台：relay $RELAY_HOST site --admin-allow <你的公网 IP>/32"; fi
+  if [[ "$mode" != restricted ]]; then
+    warn "全部放行：/admin/、/internal/ 下所有路由对公网开着，鉴权全靠 Launcher 自己（有不少写接口没有鉴权，docs/60）。要收紧：relay $RELAY_HOST site --access restricted --admin-allow <IP,...>"
+  elif [[ -s "$allow_file" ]]; then ok "管理后台和其余控制面只给：$(tr '\n' ' ' <"$allow_file")"
+  else warn "restricted 但没有登记来源：除了客户端接口谁都进不了。relay $RELAY_HOST site --admin-allow <IP,...>"; fi
+  (( tls )) && [[ "$mode" == restricted ]] && note "不知道填哪个地址：在要进后台的浏览器里打开 https://$domain/ladder2-whoami，它显示的就是这台看到的来源"
+  return 0
 }
 
 relay_push() {
@@ -147,10 +157,12 @@ relay_push() {
   fi
 }
 
-relay_site() { # relay <主机> site [--admin-allow <cidr,...>|none] [--no-push]
-  local push=1 a allow="" set_allow=0
+relay_site() { # relay <主机> site [--access open|restricted] [--admin-allow <cidr,...>|none] [--no-push]
+  local push=1 a allow="" set_allow=0 access=""
   while (( $# )); do
     case "$1" in
+      --access) access="${2:-}"; shift 2 ;;
+      --access=*) access="${1#*=}"; shift ;;
       --admin-allow) allow="${2:-}"; set_allow=1; shift 2 ;;
       --admin-allow=*) allow="${1#*=}"; set_allow=1; shift ;;
       --no-push) push=0; shift ;;
@@ -159,6 +171,10 @@ relay_site() { # relay <主机> site [--admin-allow <cidr,...>|none] [--no-push]
     esac
   done
   local state; state="$(relay_state_dir)"
+  if [[ -n "$access" ]]; then
+    [[ "$access" == open || "$access" == restricted ]] || die "--access 只能是 open 或 restricted"
+    install -d -m 700 "$state"; printf '%s\n' "$access" >"$state/ladder2-access"
+  fi
   if (( set_allow )); then
     install -d -m 700 "$state"
     if [[ "$allow" == none || -z "$allow" ]]; then rm -f "$state/ladder2-admin-allow"; ok "管理后台的公网来源清空了"

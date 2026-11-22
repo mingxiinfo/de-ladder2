@@ -19,9 +19,10 @@ map "$request_method $uri" $ladder2_bootstrap_public {
     "~^POST /internal/v1/(sdk/oauth/token|sdk/oauth/feishu/authorize|sdk/oauth/feishu/token|launcher-network/enrollments|launcher-network/snapshots)$" 1;
     "~^POST /internal/v1/launcher-network/leases/[A-Za-z0-9._-]+/(release|domestic-peer/sync|internal-direct-peer/sync|domestic-relay/diagnostics)$" 1;
 }
-# 管理后台和其余控制面接口：只给登记的来源（relay <主机> site --admin-allow）。没登记时谁都进不了，用 SSH 隧道
+# 管理后台和其余控制面接口（/admin/、/internal/ 下的其余路由）：
+#   open（默认，用户 2026-11-22）：所有人都能到 s2，鉴权交给 Launcher 自己
+#   restricted：只给登记的来源（relay <主机> site --access restricted --admin-allow <IP,...>）
 geo $ladder2_bootstrap_admin {
-    default 0;
 @ADMIN_ALLOW@
 }
 map "$ladder2_bootstrap_public$ladder2_bootstrap_admin" $ladder2_bootstrap_allow {
@@ -54,10 +55,19 @@ server {
     ssl_certificate_key @STATE_DIR@/certs/@DOMAIN@.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     client_max_body_size 2g;
+    # 本机直接回的（拒绝的 404 等）按纯文本给：默认的 application/octet-stream 会让 Chrome 报 ERR_INVALID_RESPONSE
+    default_type text/plain;
 
     location = /healthz {
         default_type application/json;
         return 200 '{"ok":true,"service":"ladder2-bootstrap-edge","role":"domestic"}';
+    }
+    # 这台看到的来源地址，和管理后台的白名单比的就是它（docs/59）。在要进后台的那个浏览器里打开，
+    # 把显示的地址填进 relay <主机> site --admin-allow。经代理、VPN 时它是出口的地址，不一定是本机以为的那个
+    location = /ladder2-whoami {
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+        return 200 "$remote_addr\n";
     }
     location ~ ^/(bootstrap-healthz|internal-healthz)$ {
         rewrite ^ /healthz break;

@@ -330,6 +330,12 @@
       "date": "2026-11-22",
       "docs": "59",
       "decisions": "mincave.minsight-ai.com 由 domestic02 的 nginx（边缘工具推）在 443 上服务：客户端接口照 v1 白名单所有人可用，管理后台只给登记的来源 IP；证书在 s2 上用 certbot 经边缘隧道签、每天续、推过去；Launcher 的 Domestic 包不开 public-tls。MinCave 两端的包：L1 导出叠 L2 源码，mac 在 Mac 上、win 在 Windows 上打，先定测试版要不要换身份"
+    },
+    {
+      "round": "第三十二轮",
+      "date": "2026-11-22",
+      "docs": "60",
+      "decisions": "mincave.minsight-ai.com 默认全部放行，Launcher 所有路由对公网开，鉴权交给 Launcher；restricted 模式保留；没有鉴权的 /internal 写接口切换前必须补"
     }
   ]
 }

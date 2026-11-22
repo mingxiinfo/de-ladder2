@@ -60,7 +60,7 @@ ${B}两条常用的${O}（docs/55）
                                                      没改到的层用缓存；基础镜像只拉一次，--pull 才重拉）→ 检查 → 迁移和一次性步骤 → apply → 等滚动 → 验证。在节点上用 root 运行
 
   relay <主机> check|docker|images|launcher-key|site|cert   在推送机（s2）上用 root，管测试中继（docs/57、docs/59）
-                                                     site [--admin-allow <IP,...>]：bootstrap 域名的站点（443 转 s2，管理后台只给登记的来源）
+                                                     site [--access open|restricted] [--admin-allow <IP,...>]：bootstrap 域名的站点（443 转 s2，默认全部放行，docs/60）
                                                      cert --agree-tos [--email x]：在 s2 上签 Let's Encrypt 证书并推过去，之后每天自动续
                                                      docker / images / launcher-key：Launcher 推 Domestic 包要的 docker、镜像、SSH 公钥
 
