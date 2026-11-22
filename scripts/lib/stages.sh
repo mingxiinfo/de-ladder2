@@ -286,6 +286,11 @@ v_cluster() {
   if kc get nodes -o jsonpath='{.items[*].spec.taints[*].key}' 2>/dev/null | grep -qw node-role.kubernetes.io/control-plane; then
     vbad "控制面还有污点，业务调度不上来（单节点要去掉）"
   else vok "控制面没有污点"; fi
+  # 集群建在哪个地址上：kubeadm 把它写进了 apiserver 的证书、etcd 和 kubelet 的 node-ip，建好以后不能再变（docs/50）
+  local nodeip; nodeip="$(kc get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)"
+  if [[ -z "$nodeip" ]]; then vunk "读不到节点的 InternalIP"
+  elif [[ "$nodeip" == "$VLAN" ]]; then vok "节点地址 $nodeip 和这次的 $VHOST 地址一致"
+  else vbad "集群建在 $nodeip 上，这次 $VHOST 的地址是 $VLAN（来自 $(site_lan_source "$VHOST")）。建好以后改地址要重签证书、改 etcd 和 kubelet：先把机器的地址固定回 $nodeip（路由器上做 DHCP 保留），或者确认是这里设错了（docs/50）"; fi
   local mode; mode="$(kc -n kube-system get cm kube-proxy -o jsonpath='{.data.config\.conf}' 2>/dev/null | awk '$1=="mode:"{print $2}')"
   vnote "kube-proxy 模式：${mode:-默认}（host-nginx 转 NodePort 用 LAN 地址，两种模式都行）"
 }
@@ -480,7 +485,11 @@ stage_verify() {
   if ! kubectl config get-contexts -o name 2>/dev/null | grep -qx "$VCTX"; then VCLUSTER="kubeconfig 里没有 context $VCTX"
   elif ! kubectl --context "$VCTX" --request-timeout=8s get --raw /readyz >/dev/null 2>&1; then VCLUSTER="API 不通"
   else VCLUSTER=yes; fi
-  echo "${B}$h${O}  地址 $VLAN；集群 context $VCTX（$([[ "$VCLUSTER" == yes ]] && echo 连得上 || echo "$VCLUSTER")）；本机$(v_on_host && echo "就是 $h" || echo "不是 $h")"
+  echo "${B}$h${O}  地址 $VLAN（来自 $(site_lan_source "$h")）；集群 context $VCTX（$([[ "$VCLUSTER" == yes ]] && echo 连得上 || echo "$VCLUSTER")）；本机$(v_on_host && echo "就是 $h" || echo "不是 $h")"
+  if ! v_on_host; then
+    # 机器其实就是这台、只是登记的地址不对时，这一行能直接看出来（docs/15 第 76 项）
+    echo "  本机 $(hostname -s 2>/dev/null) 的地址：$(local_ips | grep -vE '^(127\.|169\.254\.)' | sort -u | tr '\n' ' ')。如果这台就是 $h：这次用 $(site_env_name "$h" lan_ip)=<地址>（写在命令前或 .env），长期变了改 inventory/hosts.yaml，不要改机器（docs/50）"
+  fi
   local s summary=() b u o
   for s in "${STAGES[@]}"; do
     [[ -z "$only" || "$only" == "$s" ]] || continue

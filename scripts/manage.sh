@@ -11,6 +11,11 @@ INV_HOSTS="inventory/hosts.yaml"
 K8S="infra/k8s"
 # shellcheck source=../infra/k8s/versions.env
 source "$K8S/versions.env"
+# 机器地址可以用环境变量或本地 .env 改（docs/50）
+# shellcheck source=lib/site.sh
+source "$ROOT/scripts/lib/site.sh"
+site_load_env
+site_check_env || exit 1
 
 if [[ -t 1 ]]; then B=$'\033[1m'; D=$'\033[2m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; O=$'\033[0m'
 else B=""; D=""; G=""; Y=""; R=""; O=""; fi
@@ -118,6 +123,11 @@ cmd_hosts() {
     h && $1=="desc:"{ $1=""; sub(/^ +/,""); desc=$0 }
     END{ out() }' "$INV_HOSTS"
   echo "${D}地址：内网机器写 LAN 地址，公网机器写公网地址，都没有登记的是 —。${O}"
+  local h var
+  for h in $(awk '/^hosts:/{f=1;next} /^[a-z_]+:/{f=0} f && /^  [a-z0-9_-]+:[ ]*$/{n=$1; sub(":","",n); print n}' "$INV_HOSTS"); do
+    var="$(site_env_name "$h" lan_ip)"
+    [[ "$h" != s1 && -n "${!var:-}" ]] && echo "${Y}$h 这次用 $var=${!var}，不是上表登记的地址（docs/50）${O}"
+  done
   echo "${D}详细字段和来源：$INV_HOSTS${O}"
 }
 
@@ -190,9 +200,15 @@ cmd_check() {
   else bad "kubeadm-init.yaml 的占位和 40-cluster.sh 对不上：$ph"; fi
   local s2ip cni0; s2ip="$(host_field s2 lan_ip)"
   cni0="${POD_CIDR%/*}"; cni0="${cni0%.*}.1"   # 第一个节点分到 Pod 网段的第一个 /24，cni0 是其中的 .1
-  if grep -q "value: $s2ip/32" "$K8S/platform/gateway/ngf-values.yaml" && grep -q "value: $cni0/32" "$K8S/platform/gateway/ngf-values.yaml"; then
-    ok "网关信任的来源地址包含 s2 的 $s2ip 和 cni0 的 $cni0（docs/35）"
-  else bad "ngf-values.yaml 的 trustedAddresses 和 s2 的地址、Pod 网段对不上"; fi
+  if grep -q 'value: "@S2_LAN_IP@/32"' "$K8S/platform/gateway/ngf-values.yaml" && grep -q "value: $cni0/32" "$K8S/platform/gateway/ngf-values.yaml"; then
+    ok "网关信任的来源地址是 cni0 的 $cni0 和 s2（安装时换成 $s2ip，来自 $(site_lan_source s2)，docs/35、docs/50）"
+  else bad "ngf-values.yaml 的 trustedAddresses 要有 cni0 的 $cni0/32 和占位 \"@S2_LAN_IP@/32\"（docs/50）"; fi
+  # s2 的地址会变（docs/50）：除了 inventory/hosts.yaml 的默认值，清单和配置里只写占位，不写死地址
+  local inv_s2 hard
+  inv_s2="$(awk '/^  s2:/{h=1;next} /^  [a-z0-9_-]+:[ ]*$/{h=0} h && $1=="lan_ip:"{print $2; exit}' "$INV_HOSTS")"
+  hard="$(grep -rlF "$inv_s2" infra architecture/*/deploy inventory/probes.yaml scripts 2>/dev/null | grep -v node_modules || true)"
+  if [[ -z "$hard" ]]; then ok "s2 的地址只在 inventory/hosts.yaml 写了默认值，别处用占位或现取（docs/50）"
+  else bad "这些文件写死了 s2 的地址 $inv_s2，改成 @S2_LAN_IP@ 或用 host_field 现取：$(echo $hard)"; fi
   check_launcher_consistency "$s2ip"
 
   echo
@@ -321,11 +337,8 @@ cmd_run() {
 
 # ---------- node / backup / disk ----------
 
-host_field() { # host_field <主机> <字段>
-  awk -v h="$1" -v f="$2" '
-    /^hosts:/{inh=1;next} /^[a-z_]+:/{inh=0}
-    inh && /^  [a-z0-9_-]+:[ ]*$/{cur=$1; sub(":","",cur); next}
-    inh && cur==h && $1==f":"{ $1=""; sub(/^ +/,""); sub(/ +#.*$/,""); print; exit }' "$INV_HOSTS"
+host_field() { # host_field <主机> <字段>；lan_ip 可以被 LADDER2_<主机>_LAN_IP 覆盖（scripts/lib/site.sh，docs/50）
+  site_host_field "$INV_HOSTS" "$1" "$2" || die "主机 $1 的 $2 不对（见上一行）"
 }
 
 cmd_node() {
@@ -340,7 +353,7 @@ cmd_node() {
   local role; role="$(host_field "$host" role)"
   [[ -n "$role" ]] || die "inventory/hosts.yaml 里没有主机：${host:-（空）}"
   local addr; addr="$(host_field "$host" lan_ip)"; [[ -n "$addr" ]] || addr="$(host_field "$host" public_ip)"
-  echo "${B}$host${O}  角色 $role  地址 ${addr:-未登记}  系统 $(host_field "$host" os)"
+  echo "${B}$host${O}  角色 $role  地址 ${addr:-未登记}（来自 $(site_lan_source "$host")）  系统 $(host_field "$host" os)"
   local step=0; s() { step=$((step+1)); echo "  $step. $*"; }
   case "$role" in
     l1) echo "  这是现役的旧集群。本工程不对它做任何准备或加入操作（docs/16）。"; return 0 ;;
@@ -447,11 +460,14 @@ cmd_diagrams() {
 
 INV_PROBES="${LADDER2_PROBES:-inventory/probes.yaml}"   # LADDER2_PROBES 只给本机测试脚本用
 
-probe_field() { # probe_field <链路> <字段>
-  awk -v r="$1" -v f="$2" '
+probe_field() { # probe_field <链路> <字段>；@S2_LAN_IP@ 这类占位换成主机这次的地址（docs/50）
+  local raw
+  raw="$(awk -v r="$1" -v f="$2" '
     /^routes:/{inr=1;next} /^[a-z_]+:/{inr=0}
     inr && /^  [A-Za-z0-9_-]+:[ ]*$/{cur=$1; sub(":","",cur); next}
-    inr && cur==r && $1==f":"{ $1=""; sub(/^ +/,""); sub(/ +#.*$/,""); print; exit }' "$INV_PROBES"
+    inr && cur==r && $1==f":"{ $1=""; sub(/^ +/,""); sub(/ +#.*$/,""); print; exit }' "$INV_PROBES")"
+  site_expand "$INV_HOSTS" "$raw" || die "inventory/probes.yaml 的 $1.$2 里有换不掉的占位"
+  echo
 }
 
 probe_names() {

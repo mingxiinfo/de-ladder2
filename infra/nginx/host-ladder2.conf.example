@@ -46,7 +46,7 @@ server {
 # 只对内网开放的应用：转到 Gateway internal（docs/18）。
 # 这个 server 只监听 LAN 地址；防火墙上 30081 不对边缘的 10.88.0.1 开放。
 # server {
-#     listen 192.168.1.4:80;
+#     listen <s2 地址>:80;
 #     server_name some-app.internal.example;
 #     location / { proxy_pass http://127.0.0.1:30081; include snippets/proxy-common.conf; }
 # }

@@ -47,7 +47,7 @@ data:
       admin off
       auto_https off
       servers {
-        trusted_proxies static 192.168.224.0/20 192.168.1.4/32
+        trusted_proxies static 192.168.224.0/20
         trusted_proxies_strict
       }
     }

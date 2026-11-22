@@ -4,14 +4,15 @@
 # host：请求里的域名，内网各层靠它选路由。path：探测路径，用不访问数据库的 /healthz。
 # in_cluster：集群里的地址（Service 的 DNS 名），只给 manage.sh loadtest 从集群里压 service 那一层用（docs/35）。
 # 这里不放带凭据的地址。
+# @S2_LAN_IP@ 探测时换成 s2 这次的地址（LADDER2_S2_LAN_IP > 本地 .env > inventory/hosts.yaml，docs/50）。
 routes:
   sample:
     what: 样板服务 services/sample，经 Gateway public（docs/35）。/healthz 不访问数据库
     host: sample.ladder2.internal
     path: /healthz
     edge: 待确认
-    host_nginx: http://192.168.1.4
-    gateway: http://192.168.1.4:30080
+    host_nginx: http://@S2_LAN_IP@
+    gateway: http://@S2_LAN_IP@:30080
     service: 待确认                  # ClusterIP 每次部署会变，从宿主机测用 node verify s2 sample
     in_cluster: http://sample.sample.svc.cluster.local   # 只在集群里能解析，loadtest 的 service 一层用
   sample-internal:
@@ -20,7 +21,7 @@ routes:
     path: /healthz
     edge:
     host_nginx:
-    gateway: http://192.168.1.4:30081
+    gateway: http://@S2_LAN_IP@:30081
     service:
 
   # 海外站点（docs/33）。站点不经 host-nginx 和 Gateway，只登记公网那一层；

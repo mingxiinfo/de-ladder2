@@ -18,7 +18,7 @@
 `./scripts/manage.sh check` 只证明清单能渲染。下面这些没在集群上跑过，或者还没写：
 
 - 所有清单和 `install.sh` 在真实集群上的行为。s2 上按 `docs/35` 的阶段第一次跑时逐个核对。
-- `ngf-values.yaml` 的 `trustedAddresses` 是按原理写的（cni0 的 `192.168.224.1/32`、`192.168.1.4/32`），`node verify s2 sample` 实测。集群网段 2026-11-22 改成和 s1 一样的 `192.168.224.0/20`、`192.168.240.0/20`（`docs/41`），同样没在集群上跑过。
+- `ngf-values.yaml` 的 `trustedAddresses` 是按原理写的（cni0 的 `192.168.224.1/32`、s2 的地址；后者写成 `@S2_LAN_IP@`，安装时按 `LADDER2_S2_LAN_IP` > 本地 `.env` > inventory 换掉，`docs/50`），`node verify s2 sample` 实测。集群网段 2026-11-22 改成和 s1 一样的 `192.168.224.0/20`、`192.168.240.0/20`（`docs/41`），同样没在集群上跑过。
 - 两个 Gateway 各自映射到不同 NodePort 是否按预期工作（`node verify s2 gateway` 会查）。
 - 网关、CloudNativePG、local-path、metrics-server 的版本是否支持 Kubernetes v1.36。
 - flannel、local-path、metrics-server 的安装是从发布页下载清单再改，没有拷进本工程；上游清单的格式变了 `install.sh` 会报错停下。

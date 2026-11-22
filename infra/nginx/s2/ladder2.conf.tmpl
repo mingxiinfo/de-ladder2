@@ -118,7 +118,8 @@ server {
 # 这一层替 L1 的 Caddy 判断"是不是 Domestic 中继转来的"：只有来源是 10.88.0.1、还带着
 # X-MX-Forwarded-By: domestic-edge 的才算，沿用它带来的 X-Forwarded-For（公网用户的地址）；
 # 其余请求的 X-Forwarded-For 改写成直连地址（客户端自己填的不算），并清掉 X-MX-Forwarded-By。
-# Launcher 按 MX_HTTP_TRUST_PROXY_CIDRS 信任网关和本机，从右往左取客户端（server/src/lib/trust-proxy.ts）。
+# 网关按 trustedAddresses 认出客户端后放在 X-Forwarded-For 最右边；Launcher 按 MX_HTTP_TRUST_PROXY_CIDRS 只信网关 Pod，
+# 从右往左取客户端（server/src/lib/trust-proxy.ts，docs/50）。
 map "$remote_addr|$http_x_mx_forwarded_by" $ladder2_launcher_edge {
     default                    0;
     "10.88.0.1|domestic-edge"  1;

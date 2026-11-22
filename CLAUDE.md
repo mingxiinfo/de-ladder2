@@ -20,7 +20,7 @@ de-llaaddddeerr 的第二层：集群架构、自身业务、整套架构的知�
 
 ## 术语
 
-L1 = 现有的单机部署（s1，kubeadm）。L2 = 本工程要建的新集群（从 s2 `192.168.1.4` 开始，kubeadm v1.36，与 s1 一致）。Internal = 内网机房。Domestic = 国内公网 VPS。机器角色 control / node / site / edge 见 `docs/17`。完整术语表在 `docs/01`。
+L1 = 现有的单机部署（s1，kubeadm）。L2 = 本工程要建的新集群（从 s2 开始，kubeadm v1.36，与 s1 一致）。s2 的地址现在是 `192.168.0.117`，会变：执行前用 `LADDER2_S2_LAN_IP`（写在命令前或本地 `.env`）改，只在 `inventory/hosts.yaml` 写默认值，别处用 `@S2_LAN_IP@` 占位或现取；集群建好以后地址不能再变（`docs/50`）。Internal = 内网机房。Domestic = 国内公网 VPS。机器角色 control / node / site / edge 见 `docs/17`。完整术语表在 `docs/01`。
 
 ## 命名
 
@@ -98,7 +98,7 @@ Launcher 管人和网络（身份、MX-H2I、产品网络、订阅、Oversea 节
 - arguseek 跑在海外云服务器 `oversea-toc` 上，不在 s1；Delta（po-infra）的正式和 dev 在 s1。海外要放 Delta 就整个实例放，不要 worker 在海外、库和 Redis 在内网。海外站点不跨境用 NFS 挂 NAS，读写走 rclone 本机缓存加内网发起的隧道，隧道的内网端放 s2、s1 不动，站点只写自己的目录；站点区域没定，按实测选（`docs/33`、`docs/34`）。
 - s2 按 `docs/35` 的 14 个阶段落地：`node prepare s2 <阶段>` 做、`node verify s2 [阶段]` 验，一次一个阶段。机器上的阶段（host、nas、runtime、cluster、backup、host-nginx）在 s2 本机 sudo 跑，`PROXY` 写在 sudo 后面；分卷和边缘是手工的。1000 QPS 逐层压，边缘不在验收里（和 H2I 共用）。host-nginx 转 NodePort 用本机 LAN 地址，不用 127.0.0.1；数据库用存储类 `local-retain`（删 PVC 不删数据）。
 - MX-H2I 3.0.0 起的新界面 MinCave（`ui/`，React）和旧界面（`src/renderer.js`）在同一个包里，共用主进程；旧界面的功能（H2O 管理、AppCenter 调试、账号密码和匿名入口）没删，只是新界面没露出来。`package.json` 一直是 2.1.20，3.0.x 是 Release Center 上的安装包版本。客户端源码在 `architecture/mx-launcher/demos/mx-h2i/`（L1 `1d9555e8`，`docs/49`），它依赖的 L1 workspace 包没迁，还打不了安装包；测试版不发到生产的 Release Center（`docs/45`）。MinCave 登录页连点 5 下 logo 出现账号密码登录，要客户端 `MX_H2I_MINCAVE_PASSWORD_LOGIN=1` 和服务端 `MX_MINCAVE_PASSWORD_LOGIN_ENABLED=1` 都开，这样登录的只是员工，不是 MinCave 管理员（`docs/49`）。
-- s2 上的 Launcher API 在 host-nginx → Gateway internal 后面，不经过应用网关；客户端地址靠 `MX_HTTP_TRUST_PROXY_CIDRS`（Pod 网段加 s2 LAN，和 `ngf-values.yaml` 的 `trustedAddresses` 同一套），"是不是 Domestic 中继转来的"由 host-nginx 的 18090 段判断。应用网关 `mx-internal-gateway` 是 nginx，读 Launcher 生成的 `nginx.conf`，不再是 Caddy（`docs/47`）。网关和 Corefile 的 ConfigMap 在 `bootstrap/`，归 Launcher 运行时改，`app apply` / `app deploy` 不覆盖；要重新生成用 `architecture/mx-launcher/scripts/manage.sh bootstrap-render`，不要手改。
+- s2 上的 Launcher API 在 host-nginx → Gateway internal 后面，不经过应用网关；客户端地址由网关按 `ngf-values.yaml` 的 `trustedAddresses` 认，Launcher 的 `MX_HTTP_TRUST_PROXY_CIDRS` 只信 Pod 网段（`docs/50`），"是不是 Domestic 中继转来的"由 host-nginx 的 18090 段判断。应用网关 `mx-internal-gateway` 是 nginx，读 Launcher 生成的 `nginx.conf`，不再是 Caddy（`docs/47`）。网关和 Corefile 的 ConfigMap 在 `bootstrap/`，归 Launcher 运行时改，`app apply` / `app deploy` 不覆盖；要重新生成用 `architecture/mx-launcher/scripts/manage.sh bootstrap-render`，不要手改。
 - `10.88.88.88`（Internal）和 `10.88.0.1`（Domestic）是 Launcher 的角色地址，跟着角色走，不是某台机器的地址（用户 2026-11-22 选 A，`docs/48`）。Launcher 代码里写死它们的 72 处不改。s2 那套在自己的环境里也用 `.88`；切换是把生产 Domestic 上 `10.88.88.88/32` 对端的公钥从 s1 换成 s2，回退换回来。切换前 s2 不和生产 Domestic 握手，**s2 绝不用 s1 库里 service peer 的私钥**（密钥一样会顶掉 s1）。
 - host-runner 的 DaemonSet 由 Launcher 在管理界面上建（Ensure K8s Fallback），清单只给权限，不要在清单里也建它；分流 DNS 用 Service 的 `externalIPs`，不用 hostPort / NodePort（`docs/47`）。
 - 部署用 `app deploy`：检查 → 一次性步骤 → apply → 等滚动 → 验证，每段计时。只跑一次的迁移、修复放项目的 `deploy/once/`，跑过记进集群里的 ConfigMap `ladder2-once`，以后跳过，跑过的用 `app once archive` 挪进 `once/archive/` 留档。每次都跑的检查只放快的（`preflight.sh`、`verify.sh`），慢的放 `verify-full.sh`。出事故后的修复不要加进部署（L1 的 deploy 就是这样变慢的，`docs/47` 第 5 条）。

@@ -7,6 +7,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../versions.env
 source "$HERE/../versions.env"
+# 机器地址：环境变量 > 本地 .env > inventory（docs/50）
+# shellcheck source=../../../scripts/lib/site.sh
+SITE_ROOT="$(cd "$HERE/../../.." && pwd)" source "$HERE/../../../scripts/lib/site.sh"
+site_load_env
+site_check_env || exit 1
 
 component="${1:-}"; context="${2:-}"
 [[ -n "$component" && -n "$context" ]] || { echo "用法：install.sh <flannel|local-path|metrics-server|gateway|postgres> <context>" >&2; exit 1; }
@@ -63,16 +68,19 @@ case "$component" in
     ;;
   gateway)
     command -v helm >/dev/null || { echo "未找到 helm。" >&2; exit 1; }
-    if grep -q '192.168.1.254' "$HERE/gateway/ngf-values.yaml"; then
-      echo "gateway/ngf-values.yaml 里的 trustedAddresses 还是占位值（docs/35）。" >&2; exit 1
+    # trustedAddresses 里的 @S2_LAN_IP@ 换成这次的地址（docs/50）。换完还有占位就不装
+    site_expand "$SITE_ROOT/inventory/hosts.yaml" "$(cat "$HERE/gateway/ngf-values.yaml")" >"$WORK/ngf-values.yaml"
+    if grep -q '@[A-Z0-9_]*@' "$WORK/ngf-values.yaml"; then
+      echo "gateway/ngf-values.yaml 渲染后还有占位：$(grep -o '@[A-Z0-9_]*@' "$WORK/ngf-values.yaml" | sort -u | tr '\n' ' ')" >&2; exit 1
     fi
+    echo "  网关信任的来源地址：$(grep -A1 'type: CIDR' "$WORK/ngf-values.yaml" | awk '$1=="value:"{print $2}' | tr '\n' ' ')（s2 的地址来自 $(site_lan_source s2)）"
     echo "▶ Gateway API CRD（与 NGINX Gateway Fabric $NGF_VERSION 配套的版本）"
     with_proxy kubectl kustomize "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v$NGF_VERSION" \
       | k apply --server-side -f -
     echo "▶ NGINX Gateway Fabric $NGF_VERSION"
     with_proxy helm --kube-context "$context" upgrade --install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
       --version "$NGF_VERSION" --namespace nginx-gateway --create-namespace \
-      --values "$HERE/gateway/ngf-values.yaml" --wait --timeout 5m
+      --values "$WORK/ngf-values.yaml" --wait --timeout 5m
     echo "▶ Gateway"
     k apply -k "$HERE/gateway"
     k -n gateway wait --for=condition=Programmed gateway/public gateway/internal --timeout=180s

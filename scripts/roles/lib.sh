@@ -8,6 +8,11 @@ ROOT="$(cd "$ROLES_DIR/../.." && pwd)"
 INV_HOSTS="$ROOT/inventory/hosts.yaml"
 # shellcheck source=../../infra/k8s/versions.env
 source "$ROOT/infra/k8s/versions.env"
+# 机器地址可以用环境变量或本地 .env 改，和 manage.sh 同一套（docs/50）
+# shellcheck source=../lib/site.sh
+SITE_ROOT="$ROOT" source "$ROOT/scripts/lib/site.sh"
+site_load_env
+site_check_env || exit 1
 
 HOST="${LADDER2_HOST:-}"
 [[ -n "$HOST" ]] || { echo "错误：LADDER2_HOST 没有设置。用 ./scripts/manage.sh node prepare <主机> <阶段> 运行。" >&2; exit 1; }
@@ -19,11 +24,8 @@ die()  { echo "错误：$*" >&2; exit 1; }
 
 need_root() { [[ $EUID -eq 0 ]] || die "要用 root 运行：sudo ./scripts/manage.sh node prepare $HOST <阶段>"; }
 
-host_field() { # host_field <主机> <字段>：inventory/hosts.yaml 里单行的字段
-  awk -v h="$1" -v f="$2" '
-    /^hosts:/{inh=1;next} /^[a-z_]+:/{inh=0}
-    inh && /^  [a-z0-9_-]+:[ ]*$/{cur=$1; sub(":","",cur); next}
-    inh && cur==h && $1==f":"{ $1=""; sub(/^ +/,""); sub(/ +#.*$/,""); print; exit }' "$INV_HOSTS"
+host_field() { # host_field <主机> <字段>：inventory/hosts.yaml 里单行的字段；lan_ip 可以被 LADDER2_<主机>_LAN_IP 覆盖（docs/50）
+  site_host_field "$INV_HOSTS" "$1" "$2" || die "主机 $1 的 $2 不对"
 }
 
 host_block() { # host_block <主机> <字段>：">-" 折叠写法的多行字段，拼成一行

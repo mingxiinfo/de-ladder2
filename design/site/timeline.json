@@ -270,6 +270,12 @@
       "date": "2026-11-22",
       "docs": "49",
       "decisions": "MinCave 登录页连点 5 下 logo 出现账号密码登录（旧界面的能力），客户端和服务端各一个开关、默认关；账号密码登录只是员工，不是 MinCave 管理员；客户端源码迁进 architecture/mx-launcher/demos/mx-h2i，界面能构建能测，还打不了安装包"
+    },
+    {
+      "round": "第二十二轮",
+      "date": "2026-11-22",
+      "docs": "50",
+      "decisions": "s2 的地址是 192.168.0.117（原来登记的 192.168.1.4 不对），会变：执行前用 LADDER2_S2_LAN_IP（命令前或本地 .env）改；地址只写在 inventory，网关 trustedAddresses 和链路探测用占位现换，Launcher 只信 Pod 网段；集群建好以后地址不能再变"
     }
   ]
 }

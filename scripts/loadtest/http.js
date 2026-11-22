@@ -3,7 +3,7 @@
 import http from 'k6/http';
 import { check } from 'k6';
 
-const TARGET = __ENV.TARGET;                    // 完整地址，例如 http://192.168.1.4:30080/healthz
+const TARGET = __ENV.TARGET;                    // 完整地址，例如 http://<s2 地址>:30080/healthz
 const HOST = __ENV.HOST || '';                  // Host 头，内网各层靠它选路由
 const RATE = parseInt(__ENV.RATE || '1000', 10);
 const DURATION = __ENV.DURATION || '2m';

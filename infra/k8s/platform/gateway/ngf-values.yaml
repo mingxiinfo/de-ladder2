@@ -28,7 +28,9 @@ nginx:
         # kube-proxy 对本机发出、走 externalTrafficPolicy: Local 的流量做 SNAT，来源一般变成 flannel 网桥 cni0 的地址
         # （第一个节点是 192.168.224.1，Pod 网段 192.168.224.0/20 的第一个 /24）；不做 SNAT 时是节点的 LAN 地址。两个都只有这台机器自己能用。
         # 按原理推的，没实测：node verify s2 sample 会测网关认出的客户端地址对不对。阶段 B 加节点时补那台的两个地址。
+        # @S2_LAN_IP@ 由 install.sh 在安装时换成 s2 这次的地址：LADDER2_S2_LAN_IP > 本地 .env > inventory（docs/50）。
+        # s2 的地址变了要重新 prepare gateway；集群建好以后地址就不能再变（kubeadm 把它写进了证书和 etcd）。
         - type: CIDR
           value: 192.168.224.1/32
         - type: CIDR
-          value: 192.168.1.4/32
+          value: "@S2_LAN_IP@/32"

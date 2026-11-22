@@ -563,8 +563,9 @@ check_launcher_consistency() { # architecture/mx-launcher 里要一致的几处�
   else bad "镜像名 $ref 没有仓库地址：节点上没有时会去 Docker Hub 拉同名镜像"; fi
   for k in MX_HTTP_TRUST_PROXY_CIDRS GATEWAY_TRUSTED_PROXY_CIDRS; do
     v="$(cfgv "$k")"
-    if [[ ",$v," == *",$POD_CIDR,"* && ",$v," == *",$s2ip/32,"* ]]; then ok "$k 是 Pod 网段 $POD_CIDR 加 s2 的 $s2ip（和网关的 trustedAddresses 同一套）"
-    else bad "config.env 的 $k（$v）要包含 $POD_CIDR 和 $s2ip/32"; fi
+    # 只信 Pod 网段：s2 的地址会变，不写进 Launcher 的配置；客户端地址由网关按 trustedAddresses 认（docs/50）
+    if [[ "$v" == "$POD_CIDR" ]]; then ok "$k 只信 Pod 网段 $POD_CIDR（客户端地址由网关认，不依赖 s2 的地址）"
+    else bad "config.env 的 $k（$v）应该只写 Pod 网段 $POD_CIDR：s2 的地址会变，不要写进这里（docs/50）"; fi
   done
   # service peer（Launcher 的 Internal 角色地址）在三处要一样
   local peer dnsip corefile="$d/deploy/k8s/bootstrap/coredns-config.yaml" gw="$d/deploy/k8s/bootstrap/gateway-config.yaml"

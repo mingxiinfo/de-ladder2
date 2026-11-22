@@ -46,7 +46,7 @@ hosts:
     site: internal
     role: control
     desc: 新集群的第一个控制面，也是发起所有操作的主控
-    lan_ip: 192.168.1.4              # 用户 2026-11-17，可调整
+    lan_ip: 192.168.0.117            # 用户 2026-11-22（原来登记的 192.168.1.4 不对）。会变：执行前用 LADDER2_S2_LAN_IP 改，写在命令前或本地 .env（docs/50）；集群建好以后不能再变
     wg_ip: 10.88.88.89               # 边缘隧道 qpjoy-d02（domestic02 10.88.0.2），用户 2026-11-22 说真机已通（docs/44）。Launcher 的 service peer 在 s2 那套里是角色地址 10.88.88.88，还没装（docs/48）
     os: Ubuntu 26.04
     memory: 约 256G（用户口述"差不多"）
