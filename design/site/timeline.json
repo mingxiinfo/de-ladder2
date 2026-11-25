@@ -336,6 +336,12 @@
       "date": "2026-11-22",
       "docs": "60",
       "decisions": "mincave.minsight-ai.com 默认全部放行，Launcher 所有路由对公网开，鉴权交给 Launcher；restricted 模式保留；没有鉴权的 /internal 写接口切换前必须补"
+    },
+    {
+      "round": "第三十三轮",
+      "date": "2026-11-25",
+      "docs": "61",
+      "decisions": "Launcher 管理后台换到 v2.launcher.minsight-ai.com（全部放行），mincave.minsight-ai.com 只放客户端接口；公网站点改成一份登记、在推送机上渲染并推到多台 Domestic 和 Internal，DNS 在 Domestic 之间、Domestic 的 nginx 在 Internal 之间负载（设计）；MinCave 打包先定测试包身份"
     }
   ]
 }

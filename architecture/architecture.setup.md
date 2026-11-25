@@ -29,7 +29,7 @@ PROXY=http://127.0.0.1:7788 ./scripts/manage.sh node prepare s2 runtime
 
 # deploy admin
 # http://192.168.0.117:18090/admin/
-# 3775a34acbfb498ccc7e15a79fb839baf505b1680862b8d916f85492c6cb218b
+# 令牌不写在这里（Git 里不放 token，CLAUDE.md）：在 s2 上 sudo cat /var/lib/ladder2/secrets/mx-launcher/mx-internal-ops/token
 ```
 
 ```bash
@@ -44,4 +44,14 @@ PROXY=http://127.0.0.1:7788 ./scripts/manage.sh node prepare s2 runtime
 # 4. 打开 https://mincave.minsight-ai.com/admin/，用 Internal Ops Token 登录。
 # 5. 在 Config Center → Domestic Runtime Config 设 bootstrap：站点 domestic02，Protocol https，Bootstrap Host mincave.minsight-ai.com，Port 443，点 Save Config。上一轮部署后，站点和域名默认就是这两个。
 # 6. 客户端的 .env 用 architecture/mx-launcher/scripts/manage.sh client-env 生成，域名默认就是这个。
+
+
+# 白名单模式
+./scripts/manage.sh relay domestic02 site --access restricted --admin-allow
+
+# 放开限制
+--access open
+
+# 全部放行
+./scripts/manage.sh relay domestic02 site
 ```

@@ -111,42 +111,60 @@ RELAY_ACME_PORT=18089
 
 relay_state_dir() { echo "${QP_EDGE_HOME:-/var/lib/qp-tunnel/edge}/state/$RELAY_HOST/wg-nginx"; }
 
-relay_site_render() { # 写 nginx/ladder2-bootstrap.conf；证书在 state 里才带 443
-  local state domain link allow_file tls=0 allow_lines="" cidr
+relay_domains() { # 这台中继上的公网域名，每行"域名 角色"：bootstrap（客户端）、admin（Launcher 管理后台，docs/61）
+  local d
+  d="$(host_field "$RELAY_HOST" bootstrap_domain)"; [[ -n "$d" ]] && echo "$d bootstrap"
+  d="$(host_field "$RELAY_HOST" admin_domain)"; [[ -n "$d" ]] && echo "$d admin"
+  return 0
+}
+
+relay_domain_mode() { # relay_domain_mode <角色> → client | open | restricted
+  local state; state="$(relay_state_dir)"
+  local saved; saved="$(cat "$state/ladder2-access-$1" 2>/dev/null || true)"
+  if [[ -n "$saved" ]]; then echo "$saved"
+  elif [[ "$1" == admin ]]; then echo open
+  else echo client; fi
+}
+
+relay_site_render() { # 写 nginx/ladder2-bootstrap.conf：公共部分 + 每个域名一段；证书在 state 里的才带 443
+  local state link allow_file allow_lines="" cidr
   state="$(relay_state_dir)"
   [[ -f "$state/wg/relay.conf" ]] || die "没有 $state/wg/relay.conf：这台的边缘隧道不是这台推送机建的（qp-tunnel-cli edge relations）"
-  domain="$(host_field "$RELAY_HOST" bootstrap_domain)"
-  [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || die "inventory 里 $RELAY_HOST 的 bootstrap_domain 不是域名：${domain:-空}"
   link="$(host_field s2 wg_ip)"; site_is_ipv4 "$link" || die "inventory 里 s2 的 wg_ip（边缘隧道地址）不是地址：$link"
   allow_file="$state/ladder2-admin-allow"
-  local mode; mode="$(cat "$state/ladder2-access" 2>/dev/null || echo open)"
-  if [[ "$mode" == restricted ]]; then
-    allow_lines="    default 0;"$'\n'
-    if [[ -f "$allow_file" ]]; then
-      while IFS= read -r cidr; do [[ -n "$cidr" ]] && allow_lines+="    $cidr 1;"$'\n'; done <"$allow_file"
-    fi
-  else
-    allow_lines="    default 1;"$'\n'
+  if [[ -f "$allow_file" ]]; then
+    while IFS= read -r cidr; do [[ -n "$cidr" ]] && allow_lines+="    $cidr 1;"$'\n'; done <"$allow_file"
   fi
-  [[ -f "$state/certs/$domain.crt" && -f "$state/certs/$domain.key" ]] && tls=1
+  local domains; domains="$(relay_domains)"
+  [[ -n "$domains" ]] || die "inventory 里 $RELAY_HOST 没有 bootstrap_domain / admin_domain"
   install -d -m 700 "$state/nginx"
-  local out="$state/nginx/ladder2-bootstrap.conf" tmp
+  local out="$state/nginx/ladder2-bootstrap.conf" tmp domain role mode tls
   tmp="$(mktemp)"
-  sed -e "s#@DOMAIN@#$domain#g" -e "s#@UPSTREAM@#$link:18090#g" -e "s#@ACME_UPSTREAM@#$link:$RELAY_ACME_PORT#g" \
-    "$ROOT/infra/edge/bootstrap-site.conf.tmpl" | LADDER2_ADMIN_ALLOW="$allow_lines" awk -v tls="$tls" '
-      /^@ADMIN_ALLOW@$/ { printf "%s", ENVIRON["LADDER2_ADMIN_ALLOW"]; next }
+  LADDER2_ADMIN_ALLOW="$allow_lines" awk '/^@ADMIN_ALLOW@$/ { printf "%s", ENVIRON["LADDER2_ADMIN_ALLOW"]; next } { print }' \
+    "$ROOT/infra/edge/bootstrap-site.conf.tmpl" >"$tmp"
+  RELAY_DOMAINS_TLS=""; RELAY_DOMAINS_ALL=""
+  while read -r domain role; do
+    [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || die "inventory 里 $RELAY_HOST 的 $role 域名不是域名：$domain"
+    mode="$(relay_domain_mode "$role")"
+    tls=0; [[ -f "$state/certs/$domain.crt" && -f "$state/certs/$domain.key" ]] && tls=1
+    sed -e "s#@DOMAIN@#$domain#g" -e "s#@ROLE@#$role#g" -e "s#@MODE@#$mode#g" \
+        -e "s#@UPSTREAM@#$link:18090#g" -e "s#@ACME_UPSTREAM@#$link:$RELAY_ACME_PORT#g" \
+        "$ROOT/infra/edge/bootstrap-site.server.tmpl" | awk -v tls="$tls" '
       /^@TLS_BEGIN@$/ { skip = (tls != 1); next }
       /^@TLS_END@$/ { skip = 0; next }
-      !skip { print }' >"$tmp"
+      !skip { print }' >>"$tmp"
+    RELAY_DOMAINS_ALL+="$domain "
+    if (( tls )); then RELAY_DOMAINS_TLS+="$domain "; ok "https://$domain（$role，$mode）"
+    else warn "$domain（$role，$mode）：证书还没签，只有 80。下一步：relay $RELAY_HOST cert --agree-tos"; fi
+    case "$mode" in
+      open) [[ "$role" == bootstrap ]] && warn "$domain 全部放行：控制面对公网开着（docs/60）。客户端域名建议 --bootstrap-access client" ;;
+      restricted)
+        if [[ -s "$allow_file" ]]; then note "$domain：客户端接口 + 来源 $(tr '\n' ' ' <"$allow_file")"
+        else warn "$domain 是 restricted 但没有登记来源：只剩客户端接口。relay $RELAY_HOST site --admin-allow <IP,...>"; fi ;;
+    esac
+  done <<<"$domains"
   install -m 600 "$tmp" "$out"; rm -f "$tmp"
-  RELAY_DOMAIN="$domain"; RELAY_LINK="$link"
-  if (( tls )); then ok "站点 $domain：443（证书在 state 里）+ 80 跳转"
-  else warn "站点 $domain：证书还没签，只有 80（签证书用）。下一步：relay $RELAY_HOST cert --agree-tos"; fi
-  if [[ "$mode" != restricted ]]; then
-    warn "全部放行：/admin/、/internal/ 下所有路由对公网开着，鉴权全靠 Launcher 自己（有不少写接口没有鉴权，docs/60）。要收紧：relay $RELAY_HOST site --access restricted --admin-allow <IP,...>"
-  elif [[ -s "$allow_file" ]]; then ok "管理后台和其余控制面只给：$(tr '\n' ' ' <"$allow_file")"
-  else warn "restricted 但没有登记来源：除了客户端接口谁都进不了。relay $RELAY_HOST site --admin-allow <IP,...>"; fi
-  (( tls )) && [[ "$mode" == restricted ]] && note "不知道填哪个地址：在要进后台的浏览器里打开 https://$domain/ladder2-whoami，它显示的就是这台看到的来源"
+  RELAY_LINK="$link"
   return 0
 }
 
@@ -157,12 +175,23 @@ relay_push() {
   fi
 }
 
-relay_site() { # relay <主机> site [--access open|restricted] [--admin-allow <cidr,...>|none] [--no-push]
-  local push=1 a allow="" set_allow=0 access=""
+relay_set_mode() { # relay_set_mode <角色> <模式>
+  local role="$1" mode="$2" state; state="$(relay_state_dir)"
+  case "$role:$mode" in
+    bootstrap:client|bootstrap:open|bootstrap:restricted|admin:open|admin:restricted) ;;
+    *) die "$role 域名的模式只能是 $([[ "$role" == admin ]] && echo "open、restricted" || echo "client、open、restricted")：$mode" ;;
+  esac
+  install -d -m 700 "$state"; printf '%s\n' "$mode" >"$state/ladder2-access-$role"
+}
+
+relay_site() { # relay <主机> site [--bootstrap-access client|open|restricted] [--admin-access open|restricted] [--admin-allow <IP,...>|none] [--no-push]
+  local push=1 allow="" set_allow=0
   while (( $# )); do
     case "$1" in
-      --access) access="${2:-}"; shift 2 ;;
-      --access=*) access="${1#*=}"; shift ;;
+      --bootstrap-access|--access) relay_set_mode bootstrap "${2:-}"; shift 2 ;;
+      --bootstrap-access=*|--access=*) relay_set_mode bootstrap "${1#*=}"; shift ;;
+      --admin-access) relay_set_mode admin "${2:-}"; shift 2 ;;
+      --admin-access=*) relay_set_mode admin "${1#*=}"; shift ;;
       --admin-allow) allow="${2:-}"; set_allow=1; shift 2 ;;
       --admin-allow=*) allow="${1#*=}"; set_allow=1; shift ;;
       --no-push) push=0; shift ;;
@@ -171,19 +200,17 @@ relay_site() { # relay <主机> site [--access open|restricted] [--admin-allow <
     esac
   done
   local state; state="$(relay_state_dir)"
-  if [[ -n "$access" ]]; then
-    [[ "$access" == open || "$access" == restricted ]] || die "--access 只能是 open 或 restricted"
-    install -d -m 700 "$state"; printf '%s\n' "$access" >"$state/ladder2-access"
-  fi
+  # docs/60 的旧文件（一个模式管全部）不再用：每个域名各有模式（docs/61）
+  [[ -f "$state/ladder2-access" ]] && { rm -f "$state/ladder2-access"; note "旧的 ladder2-access 不再用了：现在按域名分别设模式（docs/61）"; }
   if (( set_allow )); then
     install -d -m 700 "$state"
-    if [[ "$allow" == none || -z "$allow" ]]; then rm -f "$state/ladder2-admin-allow"; ok "管理后台的公网来源清空了"
+    if [[ "$allow" == none || -z "$allow" ]]; then rm -f "$state/ladder2-admin-allow"; ok "登记的来源清空了"
     else
       local cidr list=()
       for cidr in ${allow//,/ }; do
         [[ "$cidr" == */* ]] || cidr="$cidr/32"
         site_is_ipv4 "${cidr%/*}" && [[ "${cidr#*/}" =~ ^([0-9]|[12][0-9]|3[0-2])$ ]] || die "不是 IPv4 地址或网段：$cidr"
-        [[ "${cidr#*/}" -ge 16 ]] || die "$cidr 太大了：管理后台只放具体的来源（/16 以内）"
+        [[ "${cidr#*/}" -ge 16 ]] || die "$cidr 太大了：只放具体的来源（/16 以内）"
         list+=("$cidr")
       done
       printf '%s\n' "${list[@]}" >"$state/ladder2-admin-allow"; chmod 600 "$state/ladder2-admin-allow"
@@ -193,13 +220,15 @@ relay_site() { # relay <主机> site [--access open|restricted] [--admin-allow <
   (( push )) && relay_push || true
 }
 
-relay_cert() { # relay <主机> cert --agree-tos [--email <地址>]
-  local agree=0 email="" a
+relay_cert() { # relay <主机> cert --agree-tos [--email <地址>] [--domain <域名>]
+  local agree=0 email="" only=""
   while (( $# )); do
     case "$1" in
       --agree-tos) agree=1; shift ;;
       --email) email="${2:-}"; shift 2 ;;
       --email=*) email="${1#*=}"; shift ;;
+      --domain) only="${2:-}"; shift 2 ;;
+      --domain=*) only="${1#*=}"; shift ;;
       --context|--context=*) [[ "$1" == --context ]] && shift; shift ;;
       *) die "不认识的参数：$1" ;;
     esac
@@ -214,27 +243,42 @@ relay_cert() { # relay <主机> cert --agree-tos [--email <地址>]
   fi
   install -d -m 700 "$RELAY_ACME_DIR"
   local who=(--register-unsafely-without-email); [[ -n "$email" ]] && who=(--email "$email")
-  echo "▶ 给 $RELAY_DOMAIN 签证书：Let's Encrypt → $RELAY_HOST:80 → 边缘隧道 → s2 $RELAY_LINK:$RELAY_ACME_PORT"
-  env ${PROXY:+HTTPS_PROXY="$PROXY" https_proxy="$PROXY"} NO_PROXY="localhost,127.0.0.1,$RELAY_LINK" \
-    certbot certonly --standalone --non-interactive --agree-tos "${who[@]}" \
-      --preferred-challenges http --http-01-address "$RELAY_LINK" --http-01-port "$RELAY_ACME_PORT" \
-      --config-dir "$RELAY_ACME_DIR/config" --work-dir "$RELAY_ACME_DIR/work" --logs-dir "$RELAY_ACME_DIR/logs" \
-      -d "$RELAY_DOMAIN" || die "签证书失败（上面是 certbot 的输出）。先确认 $RELAY_DOMAIN 解析到 $RELAY_IP、阿里云安全组放行 TCP 80（docs/59）"
-  relay_cert_install && relay_site_render && relay_push
+  local domain seen changed=0 issued=0
+  for domain in $RELAY_DOMAINS_ALL; do
+    [[ -z "$only" || "$only" == "$domain" ]] || continue
+    seen="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1; exit}')"
+    if [[ "$seen" != "$RELAY_IP" ]]; then
+      warn "跳过 $domain：解析到 ${seen:-（解析不到）}，不是 $RELAY_IP。DNS 加好以后再跑 relay $RELAY_HOST cert --agree-tos --domain $domain"
+      continue
+    fi
+    if [[ -f "$RELAY_ACME_DIR/config/live/$domain/fullchain.pem" ]]; then
+      note "$domain 已经有证书，到期前由定时器续"
+    else
+      echo "▶ 给 $domain 签证书：Let's Encrypt → $RELAY_HOST:80 → 边缘隧道 → s2 $RELAY_LINK:$RELAY_ACME_PORT"
+      env ${PROXY:+HTTPS_PROXY="$PROXY" https_proxy="$PROXY"} NO_PROXY="localhost,127.0.0.1,$RELAY_LINK" \
+        certbot certonly --standalone --non-interactive --agree-tos "${who[@]}" \
+          --preferred-challenges http --http-01-address "$RELAY_LINK" --http-01-port "$RELAY_ACME_PORT" \
+          --config-dir "$RELAY_ACME_DIR/config" --work-dir "$RELAY_ACME_DIR/work" --logs-dir "$RELAY_ACME_DIR/logs" \
+          -d "$domain" || die "签 $domain 的证书失败（上面是 certbot 的输出）。确认它解析到 $RELAY_IP、阿里云安全组放行 TCP 80（docs/59）"
+      issued=1
+    fi
+    relay_cert_install "$domain" && changed=1
+  done
+  (( changed )) && { relay_site_render && relay_push; }
   relay_cert_timer
-  ok "https://$RELAY_DOMAIN 好了。证书每天检查一次，快到期时在 s2 上续、自动推过去（ladder2-acme-renew.timer）"
+  ok "证书每天检查一次，快到期时在 s2 上续、自动推过去（ladder2-acme-renew.timer）"
 }
 
-relay_cert_install() { # 把 certbot 的证书拷进边缘工具的 state；变了才返回 0
-  local live="$RELAY_ACME_DIR/config/live/$RELAY_DOMAIN" certs; certs="$(relay_state_dir)/certs"
-  [[ -f "$live/fullchain.pem" && -f "$live/privkey.pem" ]] || die "没有 $live 下的证书"
+relay_cert_install() { # relay_cert_install <域名>：把 certbot 的证书拷进边缘工具的 state；变了才返回 0
+  local domain="$1" live="$RELAY_ACME_DIR/config/live/$1" certs; certs="$(relay_state_dir)/certs"
+  [[ -f "$live/fullchain.pem" && -f "$live/privkey.pem" ]] || return 1
   install -d -m 700 "$certs"
-  if cmp -s "$live/fullchain.pem" "$certs/$RELAY_DOMAIN.crt" && cmp -s "$live/privkey.pem" "$certs/$RELAY_DOMAIN.key"; then
-    note "证书没变"; return 1
+  if cmp -s "$live/fullchain.pem" "$certs/$domain.crt" && cmp -s "$live/privkey.pem" "$certs/$domain.key"; then
+    return 1
   fi
-  install -m 644 "$live/fullchain.pem" "$certs/$RELAY_DOMAIN.crt"
-  install -m 600 "$live/privkey.pem" "$certs/$RELAY_DOMAIN.key"
-  ok "证书放进了 $certs"
+  install -m 644 "$live/fullchain.pem" "$certs/$domain.crt"
+  install -m 600 "$live/privkey.pem" "$certs/$domain.key"
+  ok "$domain 的证书放进了 $certs"
 }
 
 relay_cert_renew() { # 定时器调用：续期，有新证书就推过去
@@ -242,12 +286,15 @@ relay_cert_renew() { # 定时器调用：续期，有新证书就推过去
   env ${PROXY:+HTTPS_PROXY="$PROXY" https_proxy="$PROXY"} NO_PROXY="localhost,127.0.0.1,$RELAY_LINK" \
     certbot renew --non-interactive --config-dir "$RELAY_ACME_DIR/config" --work-dir "$RELAY_ACME_DIR/work" --logs-dir "$RELAY_ACME_DIR/logs" \
     || die "certbot renew 失败"
-  if relay_cert_install; then relay_site_render && relay_push; fi
+  local domain changed=0
+  for domain in $RELAY_DOMAINS_ALL; do relay_cert_install "$domain" && changed=1; done
+  (( changed )) && { relay_site_render && relay_push; }
+  return 0
 }
 
 relay_cert_timer() {
   cat >/etc/systemd/system/ladder2-acme-renew.service <<UNIT
-# de-ladder2（docs/59）。续 $RELAY_DOMAIN 的证书，有新证书就推到 $RELAY_HOST
+# de-ladder2（docs/59、docs/61）。续 $RELAY_HOST 上各域名的证书（$RELAY_DOMAINS_ALL），有新证书就推过去
 [Unit]
 Description=ladder2 renew the bootstrap certificate of $RELAY_HOST
 [Service]

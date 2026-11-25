@@ -1,10 +1,10 @@
-# 测试中继上 bootstrap 域名的站点（docs/59）。由 ./scripts/manage.sh relay <主机> site 渲染进边缘工具的 state
+# 测试中继上的公网站点（docs/59、docs/60、docs/61）。由 ./scripts/manage.sh relay <主机> site 渲染进边缘工具的 state
 # （/var/lib/qp-tunnel/edge/state/<主机>/wg-nginx/nginx/ladder2-bootstrap.conf），edge push 以后装成
 # /etc/nginx/conf.d/qp-edge-wg-nginx--ladder2-bootstrap.conf。不要在目标机上手改：重新 push 会覆盖。
-# 占位：@DOMAIN@ 域名；@UPSTREAM@ s2 的 18090（经边缘隧道）；@ACME_UPSTREAM@ s2 上 certbot 临时监听的地址；
-# @ADMIN_ALLOW@ 能进管理后台的来源（geo 的行）；@TLS_BEGIN@ … @TLS_END@ 证书还没签时整段去掉。
+# 这个文件是公共部分（白名单、来源、模式），每个域名一段 server 来自 bootstrap-site.server.tmpl。
+# 占位：@ADMIN_ALLOW@ restricted 模式下能进控制面的来源（geo 的行）。
 
-# 公网上任何人都能用的接口：照 Launcher 的 Caddyfile.public-tls（v1 生产的白名单），按 method 加 path 收口
+# 客户端接口：照 Launcher 的 Caddyfile.public-tls（v1 生产 h2i.minsight-ai.com 的白名单），按 method 加 path 收口
 map "$request_method $uri" $ladder2_bootstrap_public {
     default 0;
     "~^GET /(healthz|bootstrap-healthz|internal-healthz)$" 1;
@@ -19,75 +19,23 @@ map "$request_method $uri" $ladder2_bootstrap_public {
     "~^POST /internal/v1/(sdk/oauth/token|sdk/oauth/feishu/authorize|sdk/oauth/feishu/token|launcher-network/enrollments|launcher-network/snapshots)$" 1;
     "~^POST /internal/v1/launcher-network/leases/[A-Za-z0-9._-]+/(release|domestic-peer/sync|internal-direct-peer/sync|domestic-relay/diagnostics)$" 1;
 }
-# 管理后台和其余控制面接口（/admin/、/internal/ 下的其余路由）：
-#   open（默认，用户 2026-11-22）：所有人都能到 s2，鉴权交给 Launcher 自己
-#   restricted：只给登记的来源（relay <主机> site --access restricted --admin-allow <IP,...>）
+# restricted 模式下能进控制面的来源（relay <主机> site --admin-allow <IP,...>）
 geo $ladder2_bootstrap_admin {
+    default 0;
 @ADMIN_ALLOW@
 }
-map "$ladder2_bootstrap_public$ladder2_bootstrap_admin" $ladder2_bootstrap_allow {
-    default 1;
-    "00"    0;
+# 每个域名在自己的 server 里 set $ladder2_site_mode：
+#   client     只放客户端接口（bootstrap 域名的默认，和 v1 的 h2i.minsight-ai.com 一样）
+#   open       全部放行，鉴权交给 Launcher（管理域名的默认，docs/60）
+#   restricted 客户端接口 + 登记的来源能进其余
+map "$ladder2_site_mode:$ladder2_bootstrap_public$ladder2_bootstrap_admin" $ladder2_bootstrap_allow {
+    default          0;
+    "~^open:"        1;
+    "~^client:1"     1;
+    "~^restricted:1" 1;
+    "~^restricted:01" 1;
 }
 map $http_upgrade $ladder2_bootstrap_upgrade {
     default upgrade;
     ""      close;
 }
-
-server {
-    listen 80;
-    server_name @DOMAIN@;
-    # 签证书：Let's Encrypt 来这里取挑战，转给 s2 上的 certbot（经边缘隧道）
-    location /.well-known/acme-challenge/ {
-        proxy_pass http://@ACME_UPSTREAM@;
-        proxy_set_header Host $host;
-    }
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-@TLS_BEGIN@
-server {
-    listen 443 ssl;
-    http2 on;
-    server_name @DOMAIN@;
-    ssl_certificate     @STATE_DIR@/certs/@DOMAIN@.crt;
-    ssl_certificate_key @STATE_DIR@/certs/@DOMAIN@.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    client_max_body_size 2g;
-    # 本机直接回的（拒绝的 404 等）按纯文本给：默认的 application/octet-stream 会让 Chrome 报 ERR_INVALID_RESPONSE
-    default_type text/plain;
-
-    location = /healthz {
-        default_type application/json;
-        return 200 '{"ok":true,"service":"ladder2-bootstrap-edge","role":"domestic"}';
-    }
-    # 这台看到的来源地址，和管理后台的白名单比的就是它（docs/59）。在要进后台的那个浏览器里打开，
-    # 把显示的地址填进 relay <主机> site --admin-allow。经代理、VPN 时它是出口的地址，不一定是本机以为的那个
-    location = /ladder2-whoami {
-        default_type text/plain;
-        add_header Cache-Control "no-store" always;
-        return 200 "$remote_addr\n";
-    }
-    location ~ ^/(bootstrap-healthz|internal-healthz)$ {
-        rewrite ^ /healthz break;
-        proxy_pass http://@UPSTREAM@;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-MX-Forwarded-By domestic-edge;
-    }
-    location / {
-        if ($ladder2_bootstrap_allow = 0) { return 404 "not found\n"; }
-        proxy_pass http://@UPSTREAM@;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $ladder2_bootstrap_upgrade;
-        # 覆盖，不追加：客户端自己带的 X-Forwarded-For 不算（v1 的规矩）
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-MX-Forwarded-By domestic-edge;
-        proxy_read_timeout 300s;
-        proxy_buffering off;
-    }
-}
-@TLS_END@

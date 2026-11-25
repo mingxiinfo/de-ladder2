@@ -87,7 +87,8 @@ hosts:
     desc: 第二台 Domestic。L2 的边缘隧道 qpjoy-relay（docs/44），也是 s2 那套 Launcher 的测试中继（docs/52）
     public_ip: 47.97.46.168          # 用户 2026-11-22。会变：改这一行，或执行前用 LADDER2_DOMESTIC02_PUBLIC_IP 覆盖（命令前或本地 .env，docs/54）
     wg_ip: 10.88.0.2                 # 边缘隧道地址（docs/44）。s2 那套的中继 mx-domestic 在这台上是 10.88.0.1（docs/48）
-    bootstrap_domain: mincave.minsight-ai.com   # 用户 2026-11-22 解析到这台。这台的 nginx（边缘工具）在 443 上服务它，证书在 s2 上签（docs/59）
+    bootstrap_domain: mincave.minsight-ai.com   # 客户端的 bootstrap。用户 2026-11-22 解析到这台；这台的 nginx（边缘工具）在 443 上服务它，证书在 s2 上签（docs/59）
+    admin_domain: v2.launcher.minsight-ai.com   # Launcher 管理后台（docs/61）。用户 2026-11-25 要加 v2.launcher，全名照 v1 的 launcher.minsight-ai.com 推的，待确认；DNS 要解析到这台
     ports: TCP 443（bootstrap 和管理后台的 HTTPS），TCP 80（签证书和跳转），UDP 51280（中继），UDP 51820（边缘隧道）；阿里云安全组也要放行（docs/43、docs/59）
     os: 待确认
 
